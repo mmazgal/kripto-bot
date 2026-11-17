@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: kripto-analiz-bot
+    runtime: python
+    region: frankfurt
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -u bot.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.12.7"
