@@ -127,9 +127,9 @@ def check_symbol(item: str, report: bool = False) -> list[str]:
     return msgs
 
 
-def check_all(report: bool = False) -> list[str]:
+def check_all(report: bool = False, items: list[str] | None = None) -> list[str]:
     msgs = []
-    for item in WATCHLIST:
+    for item in items or WATCHLIST:
         try:
             msgs += check_symbol(item, report=report)
         except Exception as e:  # noqa: BLE001
@@ -137,3 +137,15 @@ def check_all(report: bool = False) -> list[str]:
             if report:
                 msgs.append(f"{item}: veri alınamadı ({e})")
     return msgs
+
+
+def check_items(items: list[str]) -> dict[str, list[str]]:
+    """Her varlık için alarm mesajlarını ayrı ayrı döndürür (sohbet bazlı dağıtım için)."""
+    out = {}
+    for item in items:
+        try:
+            out[item] = check_symbol(item)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Alarm kontrolü hatası (%s): %s", item, e)
+            out[item] = []
+    return out

@@ -195,8 +195,9 @@ def forecast(price: float, score: float, daily_vol: float, days: int) -> dict:
     return {"center": center, "low": low, "high": high, "pct": (center / price - 1) * 100}
 
 
-def build_report(coin: str, name: str | None = None, market: str = "crypto") -> str:
-    """market='crypto': coin ('BTC', 'eth') USDT paritesi Binance/Bybit'te aranır.
+def compute(coin: str, name: str | None = None, market: str = "crypto") -> dict:
+    """Tüm hesaplamaları yapar, sonuçları sözlük olarak döndürür (rapor/grafik/özet ortak kullanır).
+    market='crypto': coin ('BTC', 'eth') USDT paritesi Binance/Bybit'te aranır.
     market='bist': coin Borsa İstanbul kodu ('THYAO'), veri Yahoo Finance'ten."""
     coin = coin.upper()
     if market == "bist":
@@ -235,13 +236,30 @@ def build_report(coin: str, name: str | None = None, market: str = "crypto") -> 
     month_score = float(np.clip(0.6 * w["score"] + 0.4 * d["score"], -1, 1))
     fw = forecast(price, week_score, daily_vol, week_days)
     fm = forecast(price, month_score, daily_vol, month_days)
+    return {"coin": coin, "market": market, "item": f"BIST:{coin}" if market == "bist" else coin,
+            "name": meta["name"], "pair": pair, "src": src, "chg_label": chg_label,
+            "currency": CURRENCY.get(), "daily": daily, "d": d, "w": w, "price": price, "chg": chg24,
+            "daily_vol": daily_vol, "week_score": week_score, "month_score": month_score, "fw": fw, "fm": fm}
 
+
+def compute_item(item: str, name: str | None = None) -> dict:
+    """'BTC' veya 'BIST:THYAO' biçimindeki bir varlık için compute()."""
+    if item.upper().startswith("BIST:"):
+        return compute(item.split(":", 1)[1], name, "bist")
+    return compute(item, name, "crypto")
+
+
+def render_report(ctx: dict, extra_lines: list[str] | None = None) -> str:
+    CURRENCY.set(ctx["currency"])
+    d, w, price, chg24 = ctx["d"], ctx["w"], ctx["price"], ctx["chg"]
+    week_score, month_score, fw, fm = ctx["week_score"], ctx["month_score"], ctx["fw"], ctx["fm"]
     now = datetime.now(timezone(timedelta(hours=3))).strftime("%d.%m.%Y %H:%M")
     e = html.escape
     L = []
-    L.append(f"<b>📊 {e(meta['name'])} ({pair}) Teknik Analiz</b>")
-    L.append(f"🕒 {now} (TSİ) · Kaynak: {src}")
-    L.append(f"💰 Fiyat: <b>{fmt_price(price)}</b> ({chg24:+.2f}% {chg_label})")
+    L.append(f"<b>📊 {e(ctx['name'])} ({ctx['pair']}) Teknik Analiz</b>")
+    L.append(f"🕒 {now} (TSİ) · Kaynak: {ctx['src']}")
+    L.append(f"💰 Fiyat: <b>{fmt_price(price)}</b> ({chg24:+.2f}% {ctx['chg_label']})")
+    L.extend(extra_lines or [])
     L.append("")
     L.append("<b>— Günlük Grafik Göstergeleri —</b>")
     icons = lambda v: "🟢" if v > 0.15 else ("🔴" if v < -0.15 else "⚪")  # noqa: E731
@@ -271,6 +289,10 @@ def build_report(coin: str, name: str | None = None, market: str = "crypto") -> 
     L.append("<i>⚠️ Bu bir yatırım tavsiyesi değildir. Teknik göstergeler geçmiş fiyata dayanır; "
              "haber/makro gelişmeler sonucu tamamen değiştirebilir. Aralıklar ~%68 olasılık bandıdır.</i>")
     return "\n".join(L)
+
+
+def build_report(coin: str, name: str | None = None, market: str = "crypto") -> str:
+    return render_report(compute(coin, name, market))
 
 
 def commentary(d: dict, w: dict, ws: float, ms: float) -> str:

@@ -41,3 +41,23 @@ Komutlar: `/alarm`, `/alarm ac`, `/alarm kapat`, `/alarm durum`.
 Kalıcı olması için Render'da `ALERT_CHAT_IDS` ortam değişkenine chat ID'nizi yazın.
 BIST hisseleri listeye `"BIST:THYAO"` şeklinde eklenir ve sadece seans saatlerinde kontrol edilir.
 Render ücretsiz planda uyumaması için bot kendi `/health` adresini 10 dakikada bir yoklar.
+
+## 🗄 Veritabanı (Supabase)
+Takip listesi, fiyat hedefleri, portföy, alarm/özet ayarları ve tahmin karnesi Supabase'te tutulur.
+1. Supabase > SQL Editor: `supabase_schema.sql` içeriğini yapıştırıp çalıştırın.
+2. Render > Environment: `SUPABASE_URL` ve `SUPABASE_KEY` (service_role) ekleyin.
+Tanımlı değilse bot yerel `store.json` kullanır (sadece geliştirme için; Render'da yeniden başlatınca silinir).
+
+## Tüm komutlar
+| Komut | Açıklama |
+|---|---|
+| `/analiz [coin]` | Bilgi kartı + grafik + teknik analiz + haberler |
+| `/hisse [kod]` | BIST hissesi (boş: BIST 100) |
+| `/karsilastir btc eth sol` | Yan yana tablo (hisse için sona `hisse` ekleyin) |
+| `/piyasa` | Korku/Açgözlülük, BTC dominansı, BIST 100, USD/TRY |
+| `/takip [ekle/sil] ...` | Alarm ve sabah özeti listesi |
+| `/hedef btc 60000` | Fiyat hedefi alarmı (`/hedef`, `/hedef sil 3`) |
+| `/portfoy [ekle/sil]` | Kâr/zarar takibi (`/portfoy ekle btc 0.05 62000`) |
+| `/ozet [ac/kapat]` | Her sabah 09:00 özet |
+| `/karne` | Geçmiş tahminlerin isabet oranı |
+| `/alarm [ac/kapat/durum]` | Ani hareket / hacim / teknik sinyal alarmları |
