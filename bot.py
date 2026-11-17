@@ -1,4 +1,10 @@
-"""Telegram botu: /analiz  -> BTC + SOL,  /analiz btc  veya  /analiz sol -> tek coin."""
+"""Telegram botu.
+
+/analiz              -> BTC + SOL teknik analiz
+/analiz eth pepe     -> her coin için bilgi + teknik analiz
+/bilgi doge          -> sadece coin bilgisi
+Düz mesaj: "eth", "pepe analiz", "analiz et avax" gibi yazılar da çalışır.
+"""
 import data  # noqa: F401  (SSL ayarını telegram/httpx'ten önce yapar)
 import asyncio
 import logging
@@ -9,10 +15,15 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from analysis import COINS, build_report
+from coininfo import build_info_message, find_coin, get_info
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("bot")
+
+MAX_COINS = 3
+STOPWORDS = {"analiz", "analizi", "et", "yap", "coin", "bana", "bir", "lütfen", "lutfen",
+             "ve", "ile", "bilgi", "hakkında", "hakkinda", "nedir", "kripto", "ver", "/analiz"}
 
 
 def load_env():
@@ -33,42 +44,96 @@ def allowed(update: Update) -> bool:
     return not ALLOWED or update.effective_chat.id in ALLOWED
 
 
+async def reply(update: Update, text: str, html_mode: bool = True):
+    await update.message.reply_text(text, parse_mode="HTML" if html_mode else None,
+                                    disable_web_page_preview=True)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Kripto Teknik Analiz Botu\n\n"
         "/analiz — Bitcoin ve Solana analizi\n"
-        "/analiz btc — sadece Bitcoin\n"
-        "/analiz sol — sadece Solana\n\n"
+        "/analiz eth — herhangi bir coin: bilgi + teknik analiz\n"
+        "/analiz eth pepe doge — aynı anda en fazla 3 coin\n"
+        "/bilgi avax — sadece coin bilgisi (hacim, tarihçe, nedir)\n\n"
+        "Komut yazmadan sadece coin adını (ör. \"eth\" veya \"pepe analiz\") yazman da yeterli.\n\n"
         "Göstergeler: Bollinger Bands, Parabolic SAR, RSI, StochRSI, MACD, ADX\n"
         "Tahmin: 1 hafta ve 1 ay\n\n"
         f"Chat ID'niz: {update.effective_chat.id}"
     )
 
 
-async def analiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def process_coin(update: Update, query: str, with_info: bool, with_ta: bool):
+    """Tek bir coin için bilgi ve/veya teknik analiz mesajlarını gönderir."""
+    coin = None
+    try:
+        coin = await asyncio.to_thread(find_coin, query)
+    except Exception as e:  # noqa: BLE001
+        log.warning("CoinGecko arama hatası: %s", e)
+
+    if coin is None and query.upper() not in COINS:
+        # CoinGecko bulamadı/erişilemedi: girdiyi doğrudan sembol olarak dene
+        if not with_ta:
+            await reply(update, f"❓ \"{query}\" adında bir coin bulamadım.", html_mode=False)
+            return
+    symbol = coin["symbol"].upper() if coin else query.upper()
+    name = coin["name"] if coin else None
+
+    if with_info and coin:
+        try:
+            info = await asyncio.to_thread(get_info, coin["id"])
+            await reply(update, build_info_message(info))
+        except Exception as e:  # noqa: BLE001
+            log.warning("Coin bilgisi alınamadı: %s", e)
+            await reply(update, f"⚠️ {symbol} bilgileri şu an alınamadı (CoinGecko).", html_mode=False)
+
+    if with_ta:
+        try:
+            text = await asyncio.to_thread(build_report, symbol, name)
+            await reply(update, text)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Teknik analiz hatası (%s): %s", symbol, e)
+            msg = f"❌ {symbol} için teknik analiz yapılamadı: Binance/Bybit'te {symbol}/USDT paritesi " \
+                  "yok ya da yeterli geçmiş veri bulunmuyor."
+            if coin is None:
+                msg = f"❓ \"{query}\" adında bir coin bulamadım."
+            await reply(update, msg, html_mode=False)
+
+
+async def run_request(update: Update, words: list[str], with_info: bool, with_ta: bool = True):
     if not allowed(update):
         return
-    args = [a.upper() for a in (context.args or [])]
-    coins = [a for a in args if a in COINS] or list(COINS)
+    queries = [w for w in words if w.lower() not in STOPWORDS][:MAX_COINS]
+    default = not queries
+    if default:
+        queries = list(COINS)
     wait = await update.message.reply_text("⏳ Canlı veriler alınıyor, analiz yapılıyor...")
-    for coin in coins:
-        try:
-            text = await asyncio.to_thread(build_report, coin)
-        except Exception as e:  # noqa: BLE001
-            log.exception("Analiz hatası")
-            text = f"❌ {coin} analizi yapılamadı: {e}"
-            await update.message.reply_text(text)
-            continue
-        await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
-    await wait.delete()
+    for q in queries:
+        await process_coin(update, q, with_info=with_info and not default, with_ta=with_ta)
+    try:
+        await wait.delete()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def analiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await run_request(update, context.args or [], with_info=True)
+
+
+async def bilgi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Kullanım: /bilgi eth")
+        return
+    await run_request(update, context.args, with_info=True, with_ta=False)
 
 
 async def text_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """'analiz et', 'btc analiz' gibi düz mesajları da yakalar."""
-    msg = (update.message.text or "").lower()
-    if "analiz" in msg:
-        context.args = [w for w in msg.replace("/", " ").split() if w.upper() in COINS]
-        await analiz(update, context)
+    """'eth', 'pepe analiz', 'analiz et avax' gibi düz mesajları yakalar."""
+    msg = (update.message.text or "").lower().replace("/", " ").replace(",", " ")
+    words = msg.split()
+    coins = [w for w in words if w not in STOPWORDS]
+    if "analiz" in msg or (0 < len(coins) <= MAX_COINS and len(words) <= 5):
+        await run_request(update, coins, with_info=bool(coins))
 
 
 def main():
@@ -77,7 +142,9 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler(["start", "yardim", "help"], start))
     app.add_handler(CommandHandler("analiz", analiz))
+    app.add_handler(CommandHandler("bilgi", bilgi))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_trigger))
+
     # Render gibi platformlarda webhook modu (RENDER_EXTERNAL_URL otomatik gelir), yoksa polling
     base_url = os.environ.get("WEBHOOK_URL") or os.environ.get("RENDER_EXTERNAL_URL")
     if base_url:

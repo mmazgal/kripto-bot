@@ -21,12 +21,21 @@ COINS = {
 WEIGHTS = {"MACD": 1.5, "SAR": 1.0, "ADX": 1.0, "RSI": 1.0, "StochRSI": 0.75, "Bollinger": 0.75}
 
 
+def fmt_num(x: float) -> str:
+    """Küçük fiyatlı coinler için anlamlı basamakları koruyarak biçimlendirir."""
+    a = abs(x)
+    if a >= 1000:
+        return f"{x:,.0f}"
+    if a >= 1:
+        return f"{x:,.2f}"
+    if a == 0:
+        return "0"
+    decimals = min(12, -math.floor(math.log10(a)) + 3)
+    return f"{x:.{decimals}f}"
+
+
 def fmt_price(p: float) -> str:
-    if p >= 1000:
-        return f"${p:,.0f}"
-    if p >= 1:
-        return f"${p:,.2f}"
-    return f"${p:.4f}"
+    return "$" + fmt_num(p)
 
 
 def score_label(s: float) -> str:
@@ -102,10 +111,10 @@ def analyze_frame(df) -> dict:
     k, d = ta.stoch_rsi(c)
     k_v, d_v = float(k.iloc[-1]), float(d.iloc[-1])
     if k_v < 20:
-        s, t = (1.0, "Dip bölgesinde K, D'yi yukarı kesti: AL sinyali.") if k_v > d_v else \
+        s, t = (1.0, "Dip bölgesinde K, D'yi yukarı kesti: AL sinyali.") if k_v > d_v + 2 else \
                (0.5, "Dip bölgesinde (aşırı satım), dönüş için K/D kesişimi bekleniyor.")
     elif k_v > 80:
-        s, t = (-1.0, "Tepe bölgesinde K, D'yi aşağı kesti: SAT sinyali.") if k_v < d_v else \
+        s, t = (-1.0, "Tepe bölgesinde K, D'yi aşağı kesti: SAT sinyali.") if k_v < d_v - 2 else \
                (-0.5, "Tepe bölgesinde (aşırı alım), dikkat.")
     else:
         s, t = (0.5, "K > D: kısa vadeli momentum yukarı.") if k_v > d_v else \
@@ -128,7 +137,7 @@ def analyze_frame(df) -> dict:
     if cross:
         t += " ✳️ Yakın zamanda " + ("YUKARI (al) kesişimi." if above else "AŞAĞI (sat) kesişimi.")
     t += " Sıfır çizgisinin " + ("üstünde." if m_v > 0 else "altında.")
-    out["signals"]["MACD"] = (s / 1.5, f"{m_v:,.2f} / sinyal {s_v:,.2f}", t)
+    out["signals"]["MACD"] = (s / 1.5, f"{fmt_num(m_v)} / sinyal {fmt_num(s_v)}", t)
 
     # --- ADX (14) ---
     a, pdi, mdi = ta.adx(h, l, c)
@@ -182,14 +191,17 @@ def forecast(price: float, score: float, daily_vol: float, days: int) -> dict:
     return {"center": center, "low": low, "high": high, "pct": (center / price - 1) * 100}
 
 
-def build_report(coin: str) -> str:
+def build_report(coin: str, name: str | None = None) -> str:
+    """coin: 'BTC', 'eth' gibi sembol. USDT paritesi Binance/Bybit'te aranır."""
     coin = coin.upper()
-    meta = COINS[coin]
+    meta = COINS.get(coin) or {"symbol": coin + "USDT", "name": name or coin}
     daily, src = get_klines(meta["symbol"], "1d", 500)
-    weekly, _ = get_klines(meta["symbol"], "1w", 300)
-
     d = analyze_frame(daily)
-    w = analyze_frame(weekly)
+    try:  # yeni coinlerde yeterli haftalık mum olmayabilir
+        weekly, _ = get_klines(meta["symbol"], "1w", 300)
+        w = analyze_frame(weekly)
+    except Exception:  # noqa: BLE001
+        w = d
     price = d["price"]
     chg24 = (price / float(daily["close"].iloc[-2]) - 1) * 100
     daily_vol = float(np.log(daily["close"]).diff().iloc[-60:].std())
@@ -273,7 +285,7 @@ def commentary(d: dict, w: dict, ws: float, ms: float) -> str:
 
 if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8")
-    targets = [a.upper() for a in sys.argv[1:] if a.upper() in COINS] or list(COINS)
+    targets = [a.upper() for a in sys.argv[1:]] or list(COINS)
     for t in targets:
         print(build_report(t))
         print("\n" + "=" * 60 + "\n")
