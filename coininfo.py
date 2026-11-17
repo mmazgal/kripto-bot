@@ -6,6 +6,8 @@ import re
 
 import requests
 
+from translate import to_turkish
+
 CG = "https://api.coingecko.com/api/v3"
 HEADERS = {"User-Agent": "crypto-ta-bot/1.0", "Accept": "application/json"}
 
@@ -67,7 +69,13 @@ def build_info_message(info: dict) -> str:
     usd = lambda k: (md.get(k) or {}).get("usd")  # noqa: E731
     desc_all = info.get("description", {}) or {}
     desc = clean_desc(desc_all.get("tr") or desc_all.get("en") or "")
-    lang_note = "" if desc_all.get("tr") else " <i>(kaynak İngilizce)</i>"
+    lang_note = ""
+    if desc and not desc_all.get("tr"):
+        tr = to_turkish(desc)
+        if tr:
+            desc, lang_note = tr, " <i>(otomatik çeviri)</i>"
+        else:
+            lang_note = " <i>(çeviri yapılamadı, orijinal metin)</i>"
     cats = ", ".join([c for c in (info.get("categories") or []) if c][:5])
     home = next((u for u in (info.get("links", {}).get("homepage") or []) if u), "")
     ath_date = (md.get("ath_date") or {}).get("usd", "")[:10]
