@@ -4,6 +4,7 @@
 /analiz eth pepe     -> her coin için bilgi + teknik analiz
 /bilgi doge          -> sadece coin bilgisi
 /hisse thyao asels   -> Borsa İstanbul hissesi: şirket bilgisi + teknik analiz (/hisse = BIST 100)
+/alarm               -> alarm durumu; /alarm ac, /alarm kapat, /alarm durum
 Düz mesaj: "eth", "pepe analiz", "thyao hisse", "bist" gibi yazılar da çalışır.
 """
 import data  # noqa: F401  (SSL ayarını telegram/httpx'ten önce yapar)
@@ -15,6 +16,7 @@ from pathlib import Path
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
+import alerts
 from analysis import COINS, build_report
 from coininfo import build_info_message, find_coin, get_info
 from stockinfo import build_stock_info_message, find_stock, get_stock_info
@@ -42,6 +44,10 @@ def load_env():
 load_env()
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 ALLOWED = {int(x) for x in os.environ.get("ALLOWED_CHAT_IDS", "").replace(" ", "").split(",") if x}
+# Alarmların gideceği sohbetler: kalıcı liste (env) + /alarm ac ile eklenenler (yeniden başlatınca sıfırlanır)
+ALERT_CHATS = {int(x) for x in os.environ.get("ALERT_CHAT_IDS", "").replace(" ", "").split(",") if x}
+ALERT_MUTED: set[int] = set()
+CHECK_EVERY = 300  # sn: alarm kontrol sıklığı
 
 
 def allowed(update: Update) -> bool:
@@ -64,6 +70,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/hisse thyao — hisse: şirket bilgisi + teknik analiz\n"
         "/hisse — BIST 100 endeksi analizi\n"
         "(\"thyao hisse\" veya \"aselsan hisse\" yazman da yeterli)\n\n"
+        "🚨 Alarmlar (ani düşüş/yükseliş, yüksek hacim, teknik sinyal):\n"
+        "/alarm ac · /alarm kapat · /alarm durum\n\n"
         "Komut yazmadan sadece coin adını (ör. \"eth\" veya \"pepe analiz\") yazman da yeterli.\n\n"
         "Göstergeler: Bollinger Bands, Parabolic SAR, RSI, StochRSI, MACD, ADX\n"
         "Tahmin: 1 hafta ve 1 ay\n\n"
@@ -156,6 +164,69 @@ async def hisse(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await run_stock_request(update, context.args or [])
 
 
+def alert_recipients() -> set[int]:
+    return ALERT_CHATS - ALERT_MUTED
+
+
+async def alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    chat = update.effective_chat.id
+    arg = (context.args[0].lower() if context.args else "")
+    if arg in ("ac", "aç", "on"):
+        ALERT_CHATS.add(chat)
+        ALERT_MUTED.discard(chat)
+        await update.message.reply_text("✅ Alarmlar açıldı. Eşik aşılınca buraya mesaj gelecek.")
+    elif arg in ("kapat", "off"):
+        ALERT_MUTED.add(chat)
+        await update.message.reply_text("🔕 Alarmlar kapatıldı. Tekrar açmak için /alarm ac")
+    elif arg in ("durum", "test"):
+        wait = await update.message.reply_text("⏳ Takip listesi kontrol ediliyor...")
+        lines = await asyncio.to_thread(alerts.check_all, True)
+        await wait.delete()
+        await update.message.reply_text("📋 Anlık durum (alarm eşikleri: 15dk ±%{}, 1s ±%{}, hacim {}x)\n\n{}".format(
+            alerts.DROP_15M, alerts.DROP_1H, alerts.VOLUME_X, "\n".join(lines)))
+    else:
+        active = chat in alert_recipients()
+        permanent = chat in {int(x) for x in os.environ.get("ALERT_CHAT_IDS", "").split(",") if x.strip()}
+        await update.message.reply_text(
+            f"🚨 Alarmlar: {'AÇIK ✅' if active else 'KAPALI 🔕'}\n"
+            f"Takip listesi: {', '.join(alerts.WATCHLIST)}\n"
+            f"Kontrol sıklığı: {CHECK_EVERY // 60} dakikada bir\n\n"
+            "Alarm türleri:\n"
+            f"• Ani düşüş/yükseliş: 15 dk'da ±%{alerts.DROP_15M} veya 1 saatte ±%{alerts.DROP_1H}\n"
+            f"• Yüksek hacim: son 15 dk hacmi normalin {alerts.VOLUME_X} katı\n"
+            "• Teknik sinyal: günlük SAR trend dönüşü, RSI 30/70 geçişi\n\n"
+            "/alarm ac · /alarm kapat · /alarm durum (anlık ölçümler)\n\n"
+            + ("" if permanent else
+               f"ℹ️ Kalıcı olması için Render'da ALERT_CHAT_IDS = {chat} ortam değişkenini ekle "
+               "(yoksa sunucu yeniden başlayınca /alarm ac demen gerekir).")
+        )
+
+
+async def alert_job(context: ContextTypes.DEFAULT_TYPE):
+    chats = alert_recipients()
+    if not chats:
+        return
+    msgs = await asyncio.to_thread(alerts.check_all)
+    for chat in chats:
+        for m in msgs:
+            try:
+                await context.bot.send_message(chat, m, parse_mode="HTML")
+            except Exception as e:  # noqa: BLE001
+                log.warning("Alarm gönderilemedi (%s): %s", chat, e)
+
+
+async def keepalive_job(context: ContextTypes.DEFAULT_TYPE):
+    """Render ücretsiz planda 15 dk istek gelmezse uyur; kendi adresimizi yoklayarak uyanık kalırız."""
+    url = context.job.data
+    try:
+        import requests
+        await asyncio.to_thread(requests.get, url, timeout=20)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Keepalive hatası: %s", e)
+
+
 async def run_request(update: Update, words: list[str], with_info: bool, with_ta: bool = True):
     if not allowed(update):
         return
@@ -195,27 +266,67 @@ async def text_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await run_request(update, coins, with_info=bool(coins))
 
 
-def main():
-    if not TOKEN:
-        raise SystemExit("TELEGRAM_BOT_TOKEN bulunamadı. .env dosyasına ekleyin (bkz. .env.example).")
+def build_app() -> Application:
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler(["start", "yardim", "help"], start))
     app.add_handler(CommandHandler("analiz", analiz))
     app.add_handler(CommandHandler("bilgi", bilgi))
     app.add_handler(CommandHandler(["hisse", "bist"], hisse))
+    app.add_handler(CommandHandler("alarm", alarm))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_trigger))
+    app.job_queue.run_repeating(alert_job, interval=CHECK_EVERY, first=30, name="alerts")
+    return app
 
+
+async def run_webhook_server(app: Application, base_url: str):
+    """Webhook + /health uç noktası (uyanık kalma yoklaması için) tek bir sunucuda."""
+    import hashlib
+
+    import uvicorn
+    from starlette.applications import Starlette
+    from starlette.requests import Request
+    from starlette.responses import PlainTextResponse, Response
+    from starlette.routing import Route
+
+    secret = hashlib.sha256(TOKEN.encode()).hexdigest()[:32]
+    port = int(os.environ.get("PORT", "10000"))
+    base_url = base_url.rstrip("/")
+
+    async def telegram(request: Request):
+        if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != secret:
+            return Response(status_code=403)
+        await app.update_queue.put(Update.de_json(await request.json(), app.bot))
+        return Response()
+
+    async def health(_: Request):
+        return PlainTextResponse("ok")
+
+    web = Starlette(routes=[
+        Route("/webhook", telegram, methods=["POST"]),
+        Route("/health", health, methods=["GET", "HEAD"]),
+        Route("/", health, methods=["GET", "HEAD"]),
+    ])
+    server = uvicorn.Server(uvicorn.Config(web, host="0.0.0.0", port=port, log_level="warning"))
+
+    async with app:
+        await app.bot.set_webhook(base_url + "/webhook", secret_token=secret,
+                                  allowed_updates=Update.ALL_TYPES)
+        app.job_queue.run_repeating(keepalive_job, interval=600, first=60,
+                                    data=base_url + "/health", name="keepalive")
+        await app.start()
+        log.info("Webhook modunda çalışıyor: %s (port %s)", base_url, port)
+        await server.serve()
+        await app.stop()
+
+
+def main():
+    if not TOKEN:
+        raise SystemExit("TELEGRAM_BOT_TOKEN bulunamadı. .env dosyasına ekleyin (bkz. .env.example).")
+    app = build_app()
     # Render gibi platformlarda webhook modu (RENDER_EXTERNAL_URL otomatik gelir), yoksa polling
     base_url = os.environ.get("WEBHOOK_URL") or os.environ.get("RENDER_EXTERNAL_URL")
     if base_url:
-        import hashlib
-        secret = hashlib.sha256(TOKEN.encode()).hexdigest()[:32]
-        port = int(os.environ.get("PORT", "10000"))
-        log.info("Webhook modunda çalışıyor: %s (port %s)", base_url, port)
-        app.run_webhook(
-            listen="0.0.0.0", port=port, url_path="webhook",
-            webhook_url=base_url.rstrip("/") + "/webhook", secret_token=secret,
-        )
+        asyncio.run(run_webhook_server(app, base_url))
     else:
         log.info("Bot çalışıyor (polling). Durdurmak için Ctrl+C.")
         app.run_polling()

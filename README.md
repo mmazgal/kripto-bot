@@ -29,3 +29,15 @@ Botu sadece kendiniz kullanmak için `/start` ile öğrendiğiniz chat ID'yi `.e
 - Güven: 6 göstergeden kaçının aynı yönü gösterdiği.
 
 ⚠️ Yatırım tavsiyesi değildir.
+
+## 🚨 Alarmlar
+Bot her 5 dakikada bir `alerts.py` içindeki `WATCHLIST`'i kontrol eder ve eşik aşılınca mesaj atar:
+- **Ani düşüş/yükseliş:** 15 dk'da ±%2.5 veya 1 saatte ±%4 (BIST'te ayrıca gün içi ±%4)
+- **Yüksek hacim:** son 15 dk hacmi, son 24 saatin 15 dk'lık medyanının 4 katı
+- **Teknik sinyal:** günlük Parabolic SAR dönüşü, RSI 30/70 geçişi
+
+Aynı alarm fiyat/hacim için 2 saatte, teknik sinyal için 20 saatte bir tekrarlanır.
+Komutlar: `/alarm`, `/alarm ac`, `/alarm kapat`, `/alarm durum`.
+Kalıcı olması için Render'da `ALERT_CHAT_IDS` ortam değişkenine chat ID'nizi yazın.
+BIST hisseleri listeye `"BIST:THYAO"` şeklinde eklenir ve sadece seans saatlerinde kontrol edilir.
+Render ücretsiz planda uyumaması için bot kendi `/health` adresini 10 dakikada bir yoklar.
