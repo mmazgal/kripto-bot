@@ -2,6 +2,7 @@
 
 Komut satırından test:  python analysis.py [btc|sol]
 """
+import contextvars
 import html
 import math
 import sys
@@ -10,7 +11,10 @@ from datetime import datetime, timezone, timedelta
 import numpy as np
 
 import indicators as ta
-from data import get_klines
+from data import get_klines, get_stock_klines
+
+# Para birimi sembolü (kripto: $, BIST: ₺). ContextVar: eşzamanlı isteklerde karışmaz.
+CURRENCY = contextvars.ContextVar("currency", default="$")
 
 COINS = {
     "BTC": {"symbol": "BTCUSDT", "name": "Bitcoin"},
@@ -35,7 +39,7 @@ def fmt_num(x: float) -> str:
 
 
 def fmt_price(p: float) -> str:
-    return "$" + fmt_num(p)
+    return CURRENCY.get() + fmt_num(p)
 
 
 def score_label(s: float) -> str:
@@ -191,32 +195,53 @@ def forecast(price: float, score: float, daily_vol: float, days: int) -> dict:
     return {"center": center, "low": low, "high": high, "pct": (center / price - 1) * 100}
 
 
-def build_report(coin: str, name: str | None = None) -> str:
-    """coin: 'BTC', 'eth' gibi sembol. USDT paritesi Binance/Bybit'te aranır."""
+def build_report(coin: str, name: str | None = None, market: str = "crypto") -> str:
+    """market='crypto': coin ('BTC', 'eth') USDT paritesi Binance/Bybit'te aranır.
+    market='bist': coin Borsa İstanbul kodu ('THYAO'), veri Yahoo Finance'ten."""
     coin = coin.upper()
-    meta = COINS.get(coin) or {"symbol": coin + "USDT", "name": name or coin}
-    daily, src = get_klines(meta["symbol"], "1d", 500)
+    if market == "bist":
+        ticker = coin if coin.endswith(".IS") else coin + ".IS"
+        coin = ticker[:-3]
+        CURRENCY.set("" if coin.startswith("XU") else "₺")  # endeksler puan cinsinden
+        meta = {"name": name or coin}
+        pair, chg_label, week_days, month_days = f"{coin} · BIST", "günlük", 5, 21  # işlem günü
+        daily, src = get_stock_klines(ticker, "1d", "2y")
+        src += " (~15 dk gecikmeli)"
+        load_weekly = lambda: get_stock_klines(ticker, "1wk", "6y")  # noqa: E731
+    else:
+        CURRENCY.set("$")
+        meta = COINS.get(coin) or {"symbol": coin + "USDT", "name": name or coin}
+        pair, chg_label, week_days, month_days = f"{coin}/USDT", "24s", 7, 30
+        daily, src = get_klines(meta["symbol"], "1d", 500)
+        load_weekly = lambda: get_klines(meta["symbol"], "1w", 300)  # noqa: E731
     d = analyze_frame(daily)
-    try:  # yeni coinlerde yeterli haftalık mum olmayabilir
-        weekly, _ = get_klines(meta["symbol"], "1w", 300)
+    try:  # yeni coin/hisselerde yeterli haftalık mum olmayabilir
+        weekly, _ = load_weekly()
         w = analyze_frame(weekly)
     except Exception:  # noqa: BLE001
         w = d
     price = d["price"]
-    chg24 = (price / float(daily["close"].iloc[-2]) - 1) * 100
+    prev_close = float(daily["close"].iloc[-2])
+    if market == "bist":  # Yahoo geçmişinde gün eksik olabiliyor; resmi önceki kapanışı kullan
+        try:
+            import yfinance as yf
+            prev_close = float(yf.Ticker(ticker).fast_info["previousClose"]) or prev_close
+        except Exception:  # noqa: BLE001
+            pass
+    chg24 = (price / prev_close - 1) * 100
     daily_vol = float(np.log(daily["close"]).diff().iloc[-60:].std())
 
     week_score = d["score"]
     month_score = float(np.clip(0.6 * w["score"] + 0.4 * d["score"], -1, 1))
-    fw = forecast(price, week_score, daily_vol, 7)
-    fm = forecast(price, month_score, daily_vol, 30)
+    fw = forecast(price, week_score, daily_vol, week_days)
+    fm = forecast(price, month_score, daily_vol, month_days)
 
     now = datetime.now(timezone(timedelta(hours=3))).strftime("%d.%m.%Y %H:%M")
     e = html.escape
     L = []
-    L.append(f"<b>📊 {meta['name']} ({coin}/USDT) Teknik Analiz</b>")
+    L.append(f"<b>📊 {e(meta['name'])} ({pair}) Teknik Analiz</b>")
     L.append(f"🕒 {now} (TSİ) · Kaynak: {src}")
-    L.append(f"💰 Fiyat: <b>{fmt_price(price)}</b> ({chg24:+.2f}% 24s)")
+    L.append(f"💰 Fiyat: <b>{fmt_price(price)}</b> ({chg24:+.2f}% {chg_label})")
     L.append("")
     L.append("<b>— Günlük Grafik Göstergeleri —</b>")
     icons = lambda v: "🟢" if v > 0.15 else ("🔴" if v < -0.15 else "⚪")  # noqa: E731
@@ -285,7 +310,9 @@ def commentary(d: dict, w: dict, ws: float, ms: float) -> str:
 
 if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8")
-    targets = [a.upper() for a in sys.argv[1:]] or list(COINS)
+    args = sys.argv[1:]
+    market = "bist" if args and args[0].lower() == "bist" else "crypto"
+    targets = [a.upper() for a in args if a.lower() != "bist"] or list(COINS)
     for t in targets:
-        print(build_report(t))
+        print(build_report(t, market=market))
         print("\n" + "=" * 60 + "\n")

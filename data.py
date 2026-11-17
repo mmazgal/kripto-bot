@@ -5,8 +5,31 @@ try:  # Kurumsal ağlarda (SSL denetimi) Windows sertifika deposunu kullan.
 except ImportError:
     pass
 
+import os
+import ssl
+import tempfile
+from pathlib import Path
+
 import pandas as pd
 import requests
+
+
+def _setup_curl_ca():
+    """yfinance (curl_cffi) truststore'u kullanmaz. Windows'ta kurumsal SSL denetimi varsa
+    sistem kök sertifikalarını bir dosyaya çıkarıp ona yönlendir. Linux/Render'da gereksiz."""
+    if os.name != "nt" or os.environ.get("CURL_CA_BUNDLE"):
+        return
+    try:
+        pems = [ssl.DER_cert_to_PEM_cert(c) for store in ("ROOT", "CA")
+                for c, enc, _ in ssl.enum_certificates(store) if enc == "x509_asn"]
+        path = Path(tempfile.gettempdir()) / "bta_winroots.pem"
+        path.write_text("".join(pems), encoding="ascii")
+        os.environ["CURL_CA_BUNDLE"] = str(path)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+_setup_curl_ca()
 
 TIMEOUT = 15
 HEADERS = {"User-Agent": "crypto-ta-bot/1.0"}
@@ -55,3 +78,16 @@ def get_klines(symbol: str, interval: str = "1d", limit: int = 500) -> tuple[pd.
         except Exception as e:  # noqa: BLE001
             errors.append(f"{name}: {e}")
     raise RuntimeError("Veri alınamadı -> " + " | ".join(errors))
+
+
+def get_stock_klines(ticker: str, interval: str = "1d", period: str = "2y") -> tuple[pd.DataFrame, str]:
+    """Borsa İstanbul hissesi (ör. THYAO.IS) için Yahoo Finance mumları."""
+    import yfinance as yf
+    df = yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=True)
+    if df is None or df.empty:
+        raise RuntimeError(f"{ticker} için veri bulunamadı")
+    df = df.rename(columns=str.lower)[["open", "high", "low", "close", "volume"]]
+    df = df[df["close"].notna() & (df["close"] > 0)]
+    if len(df) < 60:
+        raise RuntimeError(f"yetersiz veri ({len(df)} mum)")
+    return df, "Yahoo Finance"

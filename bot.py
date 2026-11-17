@@ -3,7 +3,8 @@
 /analiz              -> BTC + SOL teknik analiz
 /analiz eth pepe     -> her coin için bilgi + teknik analiz
 /bilgi doge          -> sadece coin bilgisi
-Düz mesaj: "eth", "pepe analiz", "analiz et avax" gibi yazılar da çalışır.
+/hisse thyao asels   -> Borsa İstanbul hissesi: şirket bilgisi + teknik analiz (/hisse = BIST 100)
+Düz mesaj: "eth", "pepe analiz", "thyao hisse", "bist" gibi yazılar da çalışır.
 """
 import data  # noqa: F401  (SSL ayarını telegram/httpx'ten önce yapar)
 import asyncio
@@ -16,6 +17,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from analysis import COINS, build_report
 from coininfo import build_info_message, find_coin, get_info
+from stockinfo import build_stock_info_message, find_stock, get_stock_info
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -23,7 +25,9 @@ log = logging.getLogger("bot")
 
 MAX_COINS = 3
 STOPWORDS = {"analiz", "analizi", "et", "yap", "coin", "bana", "bir", "lütfen", "lutfen",
-             "ve", "ile", "bilgi", "hakkında", "hakkinda", "nedir", "kripto", "ver", "/analiz"}
+             "ve", "ile", "bilgi", "hakkında", "hakkinda", "nedir", "kripto", "ver", "/analiz",
+             "hisse", "hissesi", "bist", "borsa", "/hisse", "/bist"}
+STOCK_WORDS = {"hisse", "hissesi", "bist", "borsa"}
 
 
 def load_env():
@@ -56,6 +60,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/analiz eth — herhangi bir coin: bilgi + teknik analiz\n"
         "/analiz eth pepe doge — aynı anda en fazla 3 coin\n"
         "/bilgi avax — sadece coin bilgisi (hacim, tarihçe, nedir)\n\n"
+        "🇹🇷 Borsa İstanbul:\n"
+        "/hisse thyao — hisse: şirket bilgisi + teknik analiz\n"
+        "/hisse — BIST 100 endeksi analizi\n"
+        "(\"thyao hisse\" veya \"aselsan hisse\" yazman da yeterli)\n\n"
         "Komut yazmadan sadece coin adını (ör. \"eth\" veya \"pepe analiz\") yazman da yeterli.\n\n"
         "Göstergeler: Bollinger Bands, Parabolic SAR, RSI, StochRSI, MACD, ADX\n"
         "Tahmin: 1 hafta ve 1 ay\n\n"
@@ -100,6 +108,54 @@ async def process_coin(update: Update, query: str, with_info: bool, with_ta: boo
             await reply(update, msg, html_mode=False)
 
 
+async def process_stock(update: Update, query: str):
+    """Tek bir BIST hissesi/endeksi için şirket bilgisi + teknik analiz gönderir."""
+    try:
+        ticker = await asyncio.to_thread(find_stock, query)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Hisse arama hatası: %s", e)
+        ticker = None
+    if not ticker:
+        await reply(update, f"❓ Borsa İstanbul'da \"{query}\" bulunamadı. Hisse kodunu yazmayı dene (ör. THYAO).",
+                    html_mode=False)
+        return
+    code = ticker.removesuffix(".IS")
+    if code.startswith("XU"):  # endekslerde şirket kartı yok
+        name = {"XU100": "BIST 100 Endeksi", "XU030": "BIST 30 Endeksi"}.get(code, code)
+    else:
+        name = None
+        try:
+            info = await asyncio.to_thread(get_stock_info, ticker)
+            name = info.get("longName") or info.get("shortName")
+            await reply(update, build_stock_info_message(ticker, info))
+        except Exception as e:  # noqa: BLE001
+            log.warning("Şirket bilgisi alınamadı: %s", e)
+            await reply(update, f"⚠️ {code} şirket bilgileri şu an alınamadı.", html_mode=False)
+    try:
+        text = await asyncio.to_thread(build_report, code, name, "bist")
+        await reply(update, text)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Hisse teknik analiz hatası (%s): %s", code, e)
+        await reply(update, f"❌ {code} için teknik analiz yapılamadı (yeterli veri yok).", html_mode=False)
+
+
+async def run_stock_request(update: Update, words: list[str]):
+    if not allowed(update):
+        return
+    queries = [w for w in words if w.lower() not in STOPWORDS][:MAX_COINS] or ["XU100"]
+    wait = await update.message.reply_text("⏳ Borsa verileri alınıyor, analiz yapılıyor...")
+    for q in queries:
+        await process_stock(update, q)
+    try:
+        await wait.delete()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def hisse(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await run_stock_request(update, context.args or [])
+
+
 async def run_request(update: Update, words: list[str], with_info: bool, with_ta: bool = True):
     if not allowed(update):
         return
@@ -132,6 +188,9 @@ async def text_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (update.message.text or "").lower().replace("/", " ").replace(",", " ")
     words = msg.split()
     coins = [w for w in words if w not in STOPWORDS]
+    if STOCK_WORDS & set(words):
+        await run_stock_request(update, coins)
+        return
     if "analiz" in msg or (0 < len(coins) <= MAX_COINS and len(words) <= 5):
         await run_request(update, coins, with_info=bool(coins))
 
@@ -143,6 +202,7 @@ def main():
     app.add_handler(CommandHandler(["start", "yardim", "help"], start))
     app.add_handler(CommandHandler("analiz", analiz))
     app.add_handler(CommandHandler("bilgi", bilgi))
+    app.add_handler(CommandHandler(["hisse", "bist"], hisse))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_trigger))
 
     # Render gibi platformlarda webhook modu (RENDER_EXTERNAL_URL otomatik gelir), yoksa polling
