@@ -72,6 +72,10 @@ def _daily_signals(daily) -> list[tuple[str, str]]:
         out.append(("rsi30", f"📉 Günlük RSI aşırı SATIM bölgesine girdi ({now_r:.0f})."))
     if now_r > 70 >= prev_r:
         out.append(("rsi70", f"📈 Günlük RSI aşırı ALIM bölgesine girdi ({now_r:.0f})."))
+    # Pivot 3 mum sonra doğrulanır; tam doğrulandığı gün (bars_ago == 3) bir kez bildir
+    for f in ta.divergences(daily, recent=3):
+        if f["bars_ago"] == 3:
+            out.append((f"div_{f['type']}", ta.divergence_text([f])[0]))
     return out
 
 
@@ -121,6 +125,14 @@ def check_symbol(item: str, report: bool = False) -> list[str]:
         yon = "alış" if m["ch15"] >= 0 else "satış"
         msgs.append(f"📊🔥 YÜKSEK İŞLEM HACMİ — {head}\nSon 15 dk hacmi normalin <b>{m['vol_x']:.1f} katı</b> "
                     f"(fiyat 15 dk: {m['ch15']:+.2f}%, ağırlık {yon} yönlü)\n👉 {cmd}")
+    if not is_bist:
+        try:
+            import futures
+            fa = futures.funding_alert(code)
+            if fa and _due(code, "funding", COOLDOWN_DAILY):
+                msgs.append(f"🔔 VADELİ İŞLEM UYARISI — {head}\n{fa}\n👉 {cmd}")
+        except Exception as ex:  # noqa: BLE001
+            log.warning("Fonlama kontrolü hatası (%s): %s", code, ex)
     for kind, text in _daily_signals(daily):
         if _due(code, kind, COOLDOWN_DAILY):
             msgs.append(f"🔔 TEKNİK SİNYAL — {head}\n{text}\n👉 {cmd}")

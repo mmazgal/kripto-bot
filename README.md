@@ -26,6 +26,15 @@ Tamamen ücretsiz servislerle çalışır: Render (sunucu), Supabase (veritaban�
 | ☀️ | **Sabah özeti** | Her gün 09:00'da piyasa havası + takip listesinin durumu |
 | 💼 | **Portföy** | Kâr/zarar takibi; kripto ($) + BIST (₺) ve TL cinsinden genel toplam |
 | 📒 | **Tahmin karnesi** | Bot her tahminini kaydeder, süresi dolunca doğruluğunu ölçer |
+| 🧪 | **Geriye dönük test** | Puanlama sistemi geçmiş 2-5 yılda ne kadar isabetliydi; strateji vs al-ve-tut |
+| 🔎 | **Günün fırsatları** | Her sabah ilk 100 coin + BIST 100 taranır, öne çıkan sinyaller listelenir |
+| ↔️ | **Uyumsuzluk (divergence)** | Fiyat ile RSI/MACD arasındaki pozitif/negatif uyumsuzluklar |
+| 📢 | **KAP / şirket haberleri** | Takipteki hisseler için KAP bildirimi haberleri anında |
+| 📅 | **Ekonomik takvim** | Fed, ABD enflasyon/istihdam, ECB, Çin; olaydan 30 dk önce hatırlatma |
+| 💸 | **Vadeli işlem verileri** | Fonlama oranı, açık pozisyon, long/short oranı; aşırı fonlama alarmı |
+| ⏱ | **Kısa vade modu** | 1 saatlik + 4 saatlik grafik, 24 saat / 3 gün tahmini |
+| 🔘 | **Butonlar ve menü** | Analiz altında Yenile / Kısa vade / Takibe ekle / Geçmiş testi / Hedef butonları |
+| 🤖 | **Sanal portföy** | Bot kendi sinyalleriyle sanal parayla işlem yapar, al-ve-tut ile kıyaslanır |
 
 ---
 
@@ -41,6 +50,10 @@ Tamamen ücretsiz servislerle çalışır: Render (sunucu), Supabase (veritaban�
 | `/hisse` | BIST 100 endeksi analizi (`bist30` de yazılabilir) |
 | `/karsilastir btc eth sol` | Yan yana tablo (hisseler için: `/karsilastir thyao asels hisse`) |
 | `/piyasa` | Genel piyasa havası |
+| `/kisa btc` · `/kisa thyao hisse` | Kısa vade analizi (ya da düz mesaj: `btc kısa`) |
+| `/firsat` · `/firsat kripto` · `/firsat bist` | Günün fırsatları taraması |
+| `/takvim` | Önümüzdeki önemli ekonomik olaylar |
+| `/backtest btc` · `/backtest thyao hisse` | Botun o varlıktaki geçmiş isabeti |
 
 ### Takip, alarm ve hedefler
 | Komut | Ne yapar |
@@ -61,6 +74,7 @@ Tamamen ücretsiz servislerle çalışır: Render (sunucu), Supabase (veritaban�
 | `/portfoy sil 2` | Pozisyon siler |
 | `/ozet` · `/ozet ac` · `/ozet kapat` | Sabah özetini şimdi al / her gün 09:00'da aç-kapat |
 | `/karne` | Geçmiş tahminlerin yön doğruluğu ve aralık isabeti |
+| `/sanal` | Botun sanal portföyü (kripto $10k, BIST ₺100k ile başladı) |
 | `/start` | Tüm komutlar + chat ID |
 
 ### Komutsuz kullanım
@@ -94,6 +108,16 @@ Hisseler kodla ya da şirket adıyla bulunur (`aselsan` → `ASELS`).
 İzlenen varlıklar: takip listesi + portföydekiler. BIST hisseleri yalnızca seans saatlerinde (hafta içi 10:00–18:10) kontrol edilir.
 Eşikler `alerts.py` dosyasının başındadır.
 
+### Geriye dönük test bulguları (Kasım 2026)
+`python backtest.py` ile 10 coin ve 11 BIST varlığında (2-5 yıl) ölçüldü:
+- **1 haftalık yön isabeti ~%50** — göstergelerin gelecekteki getiriyle ilişkisi çok zayıf (Spearman ≈ 0.01-0.04).
+- **Kripto:** sinyallerle al-sat, al-ve-tut'a göre kayıpları azalttı (ort. -20% vs -35%) ve en büyük düşüşü küçülttü
+  (düşüş trendlerinde piyasa dışında kalarak). Yani değeri tahminden çok **risk yönetiminde**.
+- **BIST:** TL bazında enflasyonla neredeyse sürekli yükselen piyasada strateji al-ve-tut'un çok gerisinde kaldı.
+- Ağırlık optimizasyonu test döneminde anlamlı iyileşme sağlamadı (gürültü düzeyi), varsayılan ağırlıklar korundu.
+  `python backtest.py --save` iyileşme olursa `weights.json` yazar; bot otomatik kullanır.
+- Uyumsuzluk sinyalleri de kriptoda kenar göstermedi, BIST'te zayıf bir kenar var; skora katılmaz, bilgi olarak gösterilir.
+
 ### Tahmin karnesi
 Her `/analiz`, `/hisse`, `/karsilastir` ve sabah özeti, tahminleri kaydeder (varlık + ufuk başına günde bir).
 Süresi dolan tahmin saatlik olarak gerçek fiyatla karşılaştırılır:
@@ -110,7 +134,9 @@ Süresi dolan tahmin saatlik olarak gerçek fiyatla karşılaştırılır:
 | Coin bilgisi, BTC dominansı | CoinGecko |
 | BIST fiyat/mum, şirket bilgisi, USD/TRY | Yahoo Finance (`yfinance`, ~15 dk gecikmeli) |
 | Korku/Açgözlülük endeksi | alternative.me |
-| Haberler | Google Haberler RSS (Türkçe) |
+| Haberler, KAP bildirim haberleri | Google Haberler RSS (Türkçe) |
+| Ekonomik takvim | ForexFactory haftalık akışı |
+| Vadeli işlem verileri | Binance Futures (fonlama, açık pozisyon, long/short) |
 | Çeviri | Google Translate ücretsiz uç noktası (yedek: MyMemory) |
 
 ---
@@ -124,6 +150,11 @@ Süresi dolan tahmin saatlik olarak gerçek fiyatla karşılaştırılır:
 | `indicators.py` | Gösterge formülleri (harici TA kütüphanesi yok) |
 | `charts.py` | Grafik görseli (matplotlib) |
 | `alerts.py` | Alarm kontrolleri ve eşikler |
+| `backtest.py` | Geriye dönük test ve ağırlık optimizasyonu (`python backtest.py`) |
+| `scanner.py` | Günün fırsatları taraması (BIST 100 listesi burada) |
+| `events.py` | Ekonomik takvim ve KAP/şirket haberi alarmları (TCMB tarihleri `TR_EVENTS`) |
+| `futures.py` | Binance vadeli işlem verileri |
+| `paper.py` | Sanal portföy |
 | `features.py` | Takip listesi, hedef, portföy, karne, karşılaştırma, sabah özeti |
 | `data.py` | Kripto (Binance/Bybit) ve BIST (Yahoo) mum verisi, SSL ayarları |
 | `coininfo.py` · `stockinfo.py` | Coin ve şirket bilgi kartları |
@@ -141,7 +172,7 @@ Süresi dolan tahmin saatlik olarak gerçek fiyatla karşılaştırılır:
 Telegram'da **@BotFather** → `/newbot` → bot adı ve kullanıcı adı → **token**'ı alın.
 
 ### 2. Supabase (veritabanı)
-1. **SQL Editor**'e `supabase_schema.sql` içeriğini yapıştırıp **Run** deyin.
+1. **SQL Editor**'e önce `supabase_schema.sql`, sonra `supabase_migration_2.sql` içeriğini yapıştırıp **Run** deyin.
 2. **Project Settings → API** sayfasından *Project URL* ve **service_role** anahtarını alın.
 
 ### 3. Render (sunucu)
@@ -180,3 +211,6 @@ Kurumsal ağlarda SSL denetimi için Windows sertifika deposu otomatik kullanıl
 - Binance/Bybit'te USDT paritesi olmayan coinlerde yalnızca bilgi kartı gelir; 60 günden kısa geçmişi olanlarda teknik analiz yapılamaz.
 - Çeviri ve haberler resmi olmayan ücretsiz uç noktalara dayanır; erişilemezse açıklama İngilizce gelir veya haber bölümü atlanır.
 - Alarmlar en fazla 5 dakika gecikmeyle gelir.
+- KAP alarmları resmi KAP akışı değildir (KAP'ın açık API'si yok); KAP bildirimlerini aktaran haberleri yakalar, birkaç dakika gecikebilir.
+- TCMB faiz kararı tarihleri ücretsiz takvimde yok; `events.py` içindeki `TR_EVENTS` listesine elle eklenir.
+- BIST 100 listesi `scanner.py` içinde sabittir; endeks bileşimi değişince güncellenmelidir.

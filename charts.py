@@ -54,7 +54,7 @@ def make_chart(ctx: dict) -> bytes:
             va="bottom", ha="right")
     ax.text(len(x) - 1, d["swing_low"], f" Destek {fmt_num(d['swing_low'])}", color=UP, fontsize=8,
             va="top", ha="right")
-    ax.set_title(f"{ctx['name']} ({ctx['pair']}) · Günlük · Son fiyat {ctx['currency']}{fmt_num(ctx['price'])}",
+    ax.set_title(f"{ctx['name']} ({ctx['pair']}) · {(ctx.get('labels') or {}).get('tf', 'Günlük')} · Son fiyat {ctx['currency']}{fmt_num(ctx['price'])}",
                  fontsize=11, loc="left")
     ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: fmt_num(v)))
     ax.yaxis.tick_right()
@@ -83,7 +83,7 @@ def make_chart(ctx: dict) -> bytes:
 
     ticks = list(range(0, len(x), 20))
     ax_macd.set_xticks(ticks)
-    ax_macd.set_xticklabels([dates[i].strftime("%d.%m") for i in ticks], fontsize=8)
+    ax_macd.set_xticklabels([dates[i].strftime("%d.%m %H:%M" if ctx.get("mode") == "short" else "%d.%m") for i in ticks], fontsize=7)
 
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight")

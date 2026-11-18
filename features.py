@@ -18,6 +18,7 @@ from analysis import CURRENCY, compute_item, fmt_num, score_label
 log = logging.getLogger("features")
 TR = timezone(timedelta(hours=3))
 DEFAULT_WATCHLIST = ["BTC", "SOL"]
+HZ = {1: "24s", 3: "3g", 7: "1H", 30: "1A"}
 e = html.escape
 
 
@@ -233,7 +234,8 @@ def record_prediction(ctx: dict):
     """Analizdeki 1 hafta / 1 ay tahminlerini kaydeder (varlık+ufuk başına günde bir kez)."""
     now = datetime.now(timezone.utc)
     today = datetime.now(TR).date().isoformat()
-    for days, score, fc in ((7, ctx["week_score"], ctx["fw"]), (30, ctx["month_score"], ctx["fm"])):
+    h1, h2 = ctx.get("horizons", (7, 30))
+    for days, score, fc in ((h1, ctx["week_score"], ctx["fw"]), (h2, ctx["month_score"], ctx["fm"])):
         row = {"item": ctx["item"], "horizon_days": days, "created_date": today,
                "created_at": now.isoformat(), "due_at": (now + timedelta(days=days)).isoformat(),
                "price": ctx["price"], "score": round(score, 4), "target": fc["center"],
@@ -293,7 +295,7 @@ def scorecard() -> str:
     L.append(f"Toplam sonuçlanan: <b>{n}</b> · bekleyen: {pending}")
     L.append(f"🎯 Yön doğruluğu: <b>%{c / n * 100:.0f}</b> ({c}/{n})")
     L.append(f"📏 Fiyat aralığı içinde kalma: <b>%{ir / n * 100:.0f}</b> ({ir}/{n})")
-    for days, name in ((7, "1 Hafta"), (30, "1 Ay")):
+    for days, name in ((1, "24 Saat (kısa vade)"), (3, "3 Gün (kısa vade)"), (7, "1 Hafta"), (30, "1 Ay")):
         rs = [r for r in done if r["horizon_days"] == days]
         if rs:
             c2, ir2, n2 = stats(rs)
@@ -313,7 +315,7 @@ def scorecard() -> str:
     for r in done[:6]:
         exp = expected_dir(float(r["score"]))
         chg = (float(r["final_price"]) / float(r["price"]) - 1) * 100
-        L.append(f"{'✅' if r['correct'] else '❌'} {e(label(r['item']))} {'1H' if r['horizon_days'] == 7 else '1A'}: "
+        L.append(f"{'✅' if r['correct'] else '❌'} {e(label(r['item']))} {HZ.get(r['horizon_days'], str(r['horizon_days']) + 'g')}: "
                  f"beklenen {arrows[exp]}, gerçekleşen {chg:+.1f}% ({r['created_date']})")
     L.append("\n<i>Yön: yükseliş/düşüş beklentisi tuttu mu (nötr tahminde fiyat aralıkta kaldı mı).</i>")
     return "\n".join(L)
@@ -368,6 +370,14 @@ def morning_summary(chat_id: int) -> str:
     now = datetime.now(TR)
     L = [f"<b>☀️ Günaydın! Sabah Özeti — {now.strftime('%d.%m.%Y')}</b>", ""]
     L.append(market.market_overview())
+    try:
+        import events
+        tb = events.today_block()
+        if tb:
+            L.append("")
+            L.append(tb)
+    except Exception as ex:  # noqa: BLE001
+        log.warning("Takvim özete eklenemedi: %s", ex)
     L.append("")
     L.append("<b>📋 Takip Listen</b>")
     for item in get_watchlist(chat_id):
@@ -389,5 +399,6 @@ def morning_summary(chat_id: int) -> str:
     tg = list_targets(chat_id)
     if tg:
         L.append(f"🎯 Bekleyen fiyat hedefi: {len(tg)} (/hedef)")
+    L.append("🔎 Günün fırsatları birkaç dakika içinde ayrıca gelecek (/firsat).")
     L.append("\n<i>Özeti kapatmak için: /ozet kapat</i>")
     return "\n".join(L)

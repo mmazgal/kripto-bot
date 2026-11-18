@@ -94,3 +94,64 @@ def parabolic_sar(high: pd.Series, low: pd.Series, step=0.02, max_step=0.2):
         sar[i] = s
         trend[i] = 1 if up else -1
     return pd.Series(sar, index=high.index), pd.Series(trend, index=high.index)
+
+
+def pivots(series: pd.Series, k: int = 3, kind: str = "low") -> list[int]:
+    """Yerel dip/tepe noktalarının konumları. Bir nokta, k mum öncesi ve sonrasının en düşüğü/yükseği ise pivottur
+    (son k mum doğrulanamadığı için pivot olamaz -> gelecek bilgisi kullanılmaz)."""
+    v = series.values
+    out = []
+    for i in range(k, len(v) - k):
+        win = v[i - k:i + k + 1]
+        if np.isnan(win).any():
+            continue
+        if (kind == "low" and v[i] == win.min()) or (kind == "high" and v[i] == win.max()):
+            if not out or i - out[-1] > k:
+                out.append(i)
+    return out
+
+
+def divergences(df: pd.DataFrame, lookback: int = 60, recent: int = 8, k: int = 3) -> list[dict]:
+    """Klasik uyumsuzluklar (RSI ve MACD ile):
+    - Pozitif (boğa): fiyat daha düşük dip, osilatör daha yüksek dip  -> düşüş zayıflıyor
+    - Negatif (ayı): fiyat daha yüksek tepe, osilatör daha düşük tepe -> yükseliş zayıflıyor
+    Son pivot, son `recent` mum içinde olmalı (güncel sinyal)."""
+    c, h, l = df["close"], df["high"], df["low"]
+    oscs = {"RSI": rsi(c), "MACD": macd(c)[0]}
+    n = len(df)
+    start = max(0, n - lookback)
+    found = []
+    for kind, price in (("bull", l), ("bear", h)):
+        piv = [i for i in pivots(price.iloc[start:], k, "low" if kind == "bull" else "high")]
+        piv = [i + start for i in piv]
+        if len(piv) < 2:
+            continue
+        a, b = piv[-2], piv[-1]
+        if n - 1 - b > recent or b - a < 5:
+            continue
+        for name, osc in oscs.items():
+            pa, pb_, oa, ob = price.iloc[a], price.iloc[b], osc.iloc[a], osc.iloc[b]
+            if np.isnan(oa) or np.isnan(ob):
+                continue
+            if kind == "bull" and pb_ < pa and ob > oa:
+                found.append({"type": "bull", "osc": name, "bars_ago": n - 1 - b, "span": b - a})
+            if kind == "bear" and pb_ > pa and ob < oa:
+                found.append({"type": "bear", "osc": name, "bars_ago": n - 1 - b, "span": b - a})
+    return found
+
+
+def divergence_text(found: list[dict]) -> list[str]:
+    out = []
+    for kind in ("bull", "bear"):
+        oscs = [f["osc"] for f in found if f["type"] == kind]
+        if not oscs:
+            continue
+        ago = min(f["bars_ago"] for f in found if f["type"] == kind)
+        both = " ve ".join(sorted(set(oscs)))
+        if kind == "bull":
+            out.append(f"🟢 Pozitif uyumsuzluk ({both}): fiyat daha düşük dip yaptı ama {both} daha yüksek dip yaptı "
+                       f"({ago} mum önce) -> düşüş ivmesi zayıflıyor, dönüş sinyali olabilir.")
+        else:
+            out.append(f"🔴 Negatif uyumsuzluk ({both}): fiyat daha yüksek tepe yaptı ama {both} daha düşük tepe yaptı "
+                       f"({ago} mum önce) -> yükseliş ivmesi zayıflıyor, düzeltme sinyali olabilir.")
+    return out

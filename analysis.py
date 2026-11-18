@@ -21,8 +21,53 @@ COINS = {
     "SOL": {"symbol": "SOLUSDT", "name": "Solana"},
 }
 
-# Gösterge ağırlıkları (toplam skora katkı)
-WEIGHTS = {"MACD": 1.5, "SAR": 1.0, "ADX": 1.0, "RSI": 1.0, "StochRSI": 0.75, "Bollinger": 0.75}
+# Gösterge ağırlıkları (toplam skora katkı). weights.json varsa (backtest ile optimize edilmiş) onu kullan.
+DEFAULT_WEIGHTS = {"MACD": 1.5, "SAR": 1.0, "ADX": 1.0, "RSI": 1.0, "StochRSI": 0.75, "Bollinger": 0.75}
+
+
+def _load_weights() -> dict:
+    import json
+    from pathlib import Path
+    p = Path(__file__).with_name("weights.json")
+    try:
+        w = json.loads(p.read_text(encoding="utf-8"))["weights"]
+        if set(w) == set(DEFAULT_WEIGHTS) and all(v >= 0 for v in w.values()) and sum(w.values()) > 0:
+            return {k: float(v) for k, v in w.items()}
+    except Exception:  # noqa: BLE001
+        pass
+    return dict(DEFAULT_WEIGHTS)
+
+
+WEIGHTS = _load_weights()
+
+
+def score_series(df, weights: dict | None = None):
+    """analyze_frame() ile AYNI kuralları her gün için vektörel uygular (backtest ve tarayıcı için).
+    Dönen DataFrame: gösterge skorları (-1..1), 'adx' ve 'total' sütunları."""
+    import pandas as pd
+    w = weights or WEIGHTS
+    c, h, l = df["close"], df["high"], df["low"]
+    out = pd.DataFrame(index=df.index)
+    _, _, _, pb, _ = ta.bollinger(c)
+    out["Bollinger"] = np.where(pb > 1, -0.5, np.where(pb < 0, 0.5, (pb - 0.5).clip(-0.5, 0.5))) * 2
+    _, trend = ta.parabolic_sar(h, l)
+    out["SAR"] = trend.astype(float)
+    r = ta.rsi(c)
+    out["RSI"] = np.where(r >= 70, -1.0, np.where(r <= 30, 1.0, np.where(r >= 50, 0.5, -0.5)))
+    k, d = ta.stoch_rsi(c)
+    out["StochRSI"] = np.where(k < 20, np.where(k > d + 2, 1.0, 0.5),
+                               np.where(k > 80, np.where(k < d - 2, -1.0, -0.5), np.where(k > d, 0.5, -0.5)))
+    line, sig, hist = ta.macd(c)
+    out["MACD"] = (np.where(line > sig, 1.0, -1.0) + np.where(hist > hist.shift(1), 0.5, -0.5)) / 1.5
+    a, pdi, mdi = ta.adx(h, l, c)
+    out["ADX"] = np.where(pdi > mdi, 1.0, -1.0) * np.minimum(a / 40, 1.0)
+    out["adx"] = a
+    total = sum(w[n] * out[n] for n in DEFAULT_WEIGHTS) / sum(w.values())
+    total = np.where(a < 20, total * 0.75, total)
+    out["total"] = np.clip(total, -1, 1)
+    # Göstergelerin ısınma dönemi (ilk ~40 mum) güvenilmez
+    out.iloc[:40] = np.nan
+    return out
 
 
 def fmt_num(x: float) -> str:
@@ -172,6 +217,7 @@ def analyze_frame(df) -> dict:
 
     # Volatilite ve seviyeler
     out["atr"] = float(ta.atr(h, l, c).iloc[-1])
+    out["divergences"] = ta.divergences(df)  # skora katılmaz; bilgi amaçlı (backtest'te zayıf çıktı)
     out["swing_high"] = float(h.iloc[-20:].max())
     out["swing_low"] = float(l.iloc[-20:].min())
     return out
@@ -195,26 +241,45 @@ def forecast(price: float, score: float, daily_vol: float, days: int) -> dict:
     return {"center": center, "low": low, "high": high, "pct": (center / price - 1) * 100}
 
 
-def compute(coin: str, name: str | None = None, market: str = "crypto") -> dict:
+def compute(coin: str, name: str | None = None, market: str = "crypto", mode: str = "normal") -> dict:
     """Tüm hesaplamaları yapar, sonuçları sözlük olarak döndürür (rapor/grafik/özet ortak kullanır).
     market='crypto': coin ('BTC', 'eth') USDT paritesi Binance/Bybit'te aranır.
     market='bist': coin Borsa İstanbul kodu ('THYAO'), veri Yahoo Finance'ten."""
     coin = coin.upper()
+    short = mode == "short"
+    # Etiketler: ana grafik / üst grafik / iki tahmin ufku
+    labels = ({"main": "1 Saatlik", "higher": "4 Saatlik", "h1": "24 Saat", "h2": "3 Gün", "tf": "1 saatlik"}
+              if short else
+              {"main": "Günlük", "higher": "Haftalık", "h1": "1 Hafta", "h2": "1 Ay", "tf": "Günlük"})
     if market == "bist":
         ticker = coin if coin.endswith(".IS") else coin + ".IS"
         coin = ticker[:-3]
         CURRENCY.set("" if coin.startswith("XU") else "₺")  # endeksler puan cinsinden
         meta = {"name": name or coin}
-        pair, chg_label, week_days, month_days = f"{coin} · BIST", "günlük", 5, 21  # işlem günü
-        daily, src = get_stock_klines(ticker, "1d", "2y")
+        pair = f"{coin} · BIST"
+        if short:  # BIST seansı ~8 saatlik mum/gün; üst grafik olarak günlük kullanılır
+            labels["higher"] = "Günlük"
+            chg_label, bars1, bars2 = "1s", 8, 24
+            daily, src = get_stock_klines(ticker, "60m", "3mo")
+            load_weekly = lambda: get_stock_klines(ticker, "1d", "1y")  # noqa: E731
+        else:
+            chg_label, bars1, bars2 = "günlük", 5, 21  # işlem günü
+            daily, src = get_stock_klines(ticker, "1d", "2y")
+            load_weekly = lambda: get_stock_klines(ticker, "1wk", "6y")  # noqa: E731
         src += " (~15 dk gecikmeli)"
-        load_weekly = lambda: get_stock_klines(ticker, "1wk", "6y")  # noqa: E731
     else:
         CURRENCY.set("$")
         meta = COINS.get(coin) or {"symbol": coin + "USDT", "name": name or coin}
-        pair, chg_label, week_days, month_days = f"{coin}/USDT", "24s", 7, 30
-        daily, src = get_klines(meta["symbol"], "1d", 500)
-        load_weekly = lambda: get_klines(meta["symbol"], "1w", 300)  # noqa: E731
+        pair = f"{coin}/USDT"
+        if short:
+            chg_label, bars1, bars2 = "1s", 24, 72
+            daily, src = get_klines(meta["symbol"], "1h", 500)
+            load_weekly = lambda: get_klines(meta["symbol"], "4h", 500)  # noqa: E731
+        else:
+            chg_label, bars1, bars2 = "24s", 7, 30
+            daily, src = get_klines(meta["symbol"], "1d", 500)
+            load_weekly = lambda: get_klines(meta["symbol"], "1w", 300)  # noqa: E731
+    week_days, month_days = bars1, bars2
     d = analyze_frame(daily)
     try:  # yeni coin/hisselerde yeterli haftalık mum olmayabilir
         weekly, _ = load_weekly()
@@ -223,7 +288,7 @@ def compute(coin: str, name: str | None = None, market: str = "crypto") -> dict:
         w = d
     price = d["price"]
     prev_close = float(daily["close"].iloc[-2])
-    if market == "bist":  # Yahoo geçmişinde gün eksik olabiliyor; resmi önceki kapanışı kullan
+    if market == "bist" and not short:  # Yahoo geçmişinde gün eksik olabiliyor; resmi önceki kapanışı kullan
         try:
             import yfinance as yf
             prev_close = float(yf.Ticker(ticker).fast_info["previousClose"]) or prev_close
@@ -239,14 +304,17 @@ def compute(coin: str, name: str | None = None, market: str = "crypto") -> dict:
     return {"coin": coin, "market": market, "item": f"BIST:{coin}" if market == "bist" else coin,
             "name": meta["name"], "pair": pair, "src": src, "chg_label": chg_label,
             "currency": CURRENCY.get(), "daily": daily, "d": d, "w": w, "price": price, "chg": chg24,
-            "daily_vol": daily_vol, "week_score": week_score, "month_score": month_score, "fw": fw, "fm": fm}
+            "daily_vol": daily_vol, "week_score": week_score, "month_score": month_score, "fw": fw, "fm": fm,
+            "mode": mode, "labels": labels,
+            # Tahmin ufku (takvim günü) — karne kaydı için
+            "horizons": (1, 3) if short else (7, 30)}
 
 
-def compute_item(item: str, name: str | None = None) -> dict:
+def compute_item(item: str, name: str | None = None, mode: str = "normal") -> dict:
     """'BTC' veya 'BIST:THYAO' biçimindeki bir varlık için compute()."""
     if item.upper().startswith("BIST:"):
-        return compute(item.split(":", 1)[1], name, "bist")
-    return compute(item, name, "crypto")
+        return compute(item.split(":", 1)[1], name, "bist", mode)
+    return compute(item, name, "crypto", mode)
 
 
 def render_report(ctx: dict, extra_lines: list[str] | None = None) -> str:
@@ -255,39 +323,53 @@ def render_report(ctx: dict, extra_lines: list[str] | None = None) -> str:
     week_score, month_score, fw, fm = ctx["week_score"], ctx["month_score"], ctx["fw"], ctx["fm"]
     now = datetime.now(timezone(timedelta(hours=3))).strftime("%d.%m.%Y %H:%M")
     e = html.escape
+    lb = ctx.get("labels") or {"main": "Günlük", "higher": "Haftalık", "h1": "1 Hafta", "h2": "1 Ay"}
     L = []
-    L.append(f"<b>📊 {e(ctx['name'])} ({ctx['pair']}) Teknik Analiz</b>")
+    title_mode = " · Kısa Vade" if ctx.get("mode") == "short" else ""
+    L.append(f"<b>📊 {e(ctx['name'])} ({ctx['pair']}) Teknik Analiz{title_mode}</b>")
     L.append(f"🕒 {now} (TSİ) · Kaynak: {ctx['src']}")
     L.append(f"💰 Fiyat: <b>{fmt_price(price)}</b> ({chg24:+.2f}% {ctx['chg_label']})")
     L.extend(extra_lines or [])
     L.append("")
-    L.append("<b>— Günlük Grafik Göstergeleri —</b>")
+    L.append(f"<b>— {lb['main']} Grafik Göstergeleri —</b>")
     icons = lambda v: "🟢" if v > 0.15 else ("🔴" if v < -0.15 else "⚪")  # noqa: E731
     for name in ("Bollinger", "SAR", "RSI", "StochRSI", "MACD", "ADX"):
         s, val, txt = d["signals"][name]
         title = "Parabolic SAR" if name == "SAR" else ("Bollinger Bands" if name == "Bollinger" else name)
         L.append(f"{icons(s)} <b>{title}</b>: {e(val)}\n   ↳ {e(txt)}")
     L.append("")
-    L.append("<b>— Haftalık Grafik (büyük resim) —</b>")
+    L.append(f"<b>— {lb['higher']} Grafik (büyük resim) —</b>")
     L.append(" · ".join(f"{icons(v[0])}{n}" for n, v in w["signals"].items()))
-    L.append(f"Haftalık skor: {w['score']:+.2f} → {score_label(w['score'])}")
+    L.append(f"{lb['higher']} skor: {w['score']:+.2f} → {score_label(w['score'])}")
     L.append("")
     L.append("<b>— Önemli Seviyeler —</b>")
-    L.append(f"Direnç: {fmt_price(d['bb']['upper'])} (BB üst) · {fmt_price(d['swing_high'])} (20g zirve)")
-    L.append(f"Destek: {fmt_price(d['bb']['lower'])} (BB alt) · {fmt_price(d['swing_low'])} (20g dip)")
+    L.append(f"Direnç: {fmt_price(d['bb']['upper'])} (BB üst) · {fmt_price(d['swing_high'])} (son 20 mum zirve)")
+    L.append(f"Destek: {fmt_price(d['bb']['lower'])} (BB alt) · {fmt_price(d['swing_low'])} (son 20 mum dip)")
     L.append(f"SAR (trend dönüş seviyesi): {fmt_price(d['sar'])}")
+    div = ta.divergence_text(d.get("divergences", []))
+    if div:
+        L.append("")
+        L.append("<b>— Uyumsuzluk (Divergence) —</b>")
+        L.extend(e(x) for x in div)
+    L.extend(ctx.get("extra_sections", []))  # üreten taraf HTML-güvenli verir
     L.append("")
     L.append("<b>🔮 TAHMİN</b>")
-    L.append(f"<b>1 Hafta:</b> {score_label(week_score)} (skor {week_score:+.2f}, güven: {confidence(d['agreement'])})")
+    L.append(f"<b>{lb['h1']}:</b> {score_label(week_score)} (skor {week_score:+.2f}, gösterge uyumu: {d['agreement']}/6)")
     L.append(f"   Hedef ≈ {fmt_price(fw['center'])} ({fw['pct']:+.1f}%) · Aralık {fmt_price(fw['low'])} – {fmt_price(fw['high'])}")
-    L.append(f"<b>1 Ay:</b> {score_label(month_score)} (skor {month_score:+.2f}, güven: {confidence(w['agreement'])})")
+    L.append(f"<b>{lb['h2']}:</b> {score_label(month_score)} (skor {month_score:+.2f}, gösterge uyumu: {w['agreement']}/6)")
     L.append(f"   Hedef ≈ {fmt_price(fm['center'])} ({fm['pct']:+.1f}%) · Aralık {fmt_price(fm['low'])} – {fmt_price(fm['high'])}")
     L.append("")
     L.append("<b>💬 Yorum</b>")
-    L.append(e(commentary(d, w, week_score, month_score)))
+    com = commentary(d, w, week_score, month_score)
+    if ctx.get("mode") == "short":
+        for a, b in (("Günlükte", "1 saatlik grafikte"), ("Haftalık ve günlük grafik", f"{lb['higher']} ve 1 saatlik grafik"),
+                     ("1 haftalık", "24 saatlik"), ("1 aylık", "3 günlük")):
+            com = com.replace(a, b)
+    L.append(e(com))
     L.append("")
     L.append("<i>⚠️ Bu bir yatırım tavsiyesi değildir. Teknik göstergeler geçmiş fiyata dayanır; "
-             "haber/makro gelişmeler sonucu tamamen değiştirebilir. Aralıklar ~%68 olasılık bandıdır.</i>")
+             "haber/makro gelişmeler sonucu tamamen değiştirebilir. Aralıklar ~%68 olasılık bandıdır. "
+             "Geçmiş testlerde 1 haftalık yön isabeti ~%50 çıktı (ayrıntı: /backtest).</i>")
     return "\n".join(L)
 
 

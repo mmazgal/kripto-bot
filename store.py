@@ -64,7 +64,9 @@ _FILE = Path(__file__).with_name("store.json")
 _OPS = {"eq": lambda a, b: a == b, "neq": lambda a, b: a != b, "lt": lambda a, b: a < b,
         "lte": lambda a, b: a <= b, "gt": lambda a, b: a > b, "gte": lambda a, b: a >= b}
 _PKEYS = {"settings": ("chat_id",), "watchlist": ("chat_id", "item"),
-          "predictions": ("item", "horizon_days", "created_date")}
+          "predictions": ("item", "horizon_days", "created_date"), "notified": ("key",),
+          "paper_state": ("market",), "paper_positions": ("market", "item")}
+_NO_ID = {"settings", "watchlist", "notified", "paper_state", "paper_positions"}
 
 
 def _load():
@@ -113,7 +115,7 @@ def insert(table, row, upsert=False):
                     _save(db)
                     return existing
                 raise RuntimeError("duplicate")
-        if "id" not in row and table not in ("settings", "watchlist"):
+        if "id" not in row and table not in _NO_ID:
             row = {"id": max([r.get("id", 0) for r in rows] + [0]) + 1, **row}
         rows.append(row)
         _save(db)

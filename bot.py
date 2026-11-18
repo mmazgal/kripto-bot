@@ -9,13 +9,22 @@ import os
 from datetime import time as dtime
 from pathlib import Path
 
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+import re
+from datetime import datetime
+
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler,
+                          filters)
 
 import alerts
+import backtest
+import events
 import features as F
+import futures
 import market
-from analysis import COINS, compute_item, render_report
+import paper
+import scanner
+from analysis import COINS, compute_item, fmt_num, render_report
 from charts import make_chart
 from coininfo import build_info_message, find_coin, get_info
 from stockinfo import build_stock_info_message, find_stock, get_stock_info
@@ -28,30 +37,49 @@ log = logging.getLogger("bot")
 MAX_ITEMS = 3
 STOPWORDS = {"analiz", "analizi", "et", "yap", "coin", "bana", "bir", "lütfen", "lutfen",
              "ve", "ile", "bilgi", "hakkında", "hakkinda", "nedir", "kripto", "ver", "/analiz",
-             "hisse", "hissesi", "bist", "borsa", "/hisse", "/bist"}
+             "hisse", "hissesi", "bist", "borsa", "/hisse", "/bist", "kisa", "kısa", "vade", "/kisa"}
 STOCK_WORDS = {"hisse", "hissesi", "bist", "borsa"}
+SHORT_WORDS = {"kisa", "kısa", "/kisa"}
 CHECK_EVERY = 300          # sn: alarm kontrol sıklığı
 SUMMARY_TIME = dtime(9, 0, tzinfo=F.TR)
+SCAN_TIME = dtime(9, 5, tzinfo=F.TR)
+PAPER_TIME = dtime(9, 15, tzinfo=F.TR)
+ITEM_RE = re.compile(r"^(BIST:)?[A-Z0-9]{1,15}$")
 
 HELP = (
     "👋 <b>Kripto & Borsa Analiz Botu</b>\n\n"
     "<b>📊 Analiz</b>\n"
-    "/analiz — BTC + SOL · /analiz eth — herhangi bir coin\n"
+    "/analiz eth — coin: bilgi + grafik + analiz + vadeli işlem verisi + haberler\n"
     "/hisse thyao — BIST hissesi · /hisse — BIST 100\n"
+    "/kisa btc — kısa vade (1 saatlik grafik, 24 saat / 3 gün tahmini)\n"
     "/bilgi doge — sadece coin bilgisi\n"
     "/karsilastir btc eth sol — yan yana karşılaştırma\n"
     "/piyasa — korku/açgözlülük, BTC dominansı, dolar/TL\n\n"
+    "<b>🔎 Keşif</b>\n"
+    "/firsat — günün fırsatları (ilk 100 coin + BIST 100 taraması)\n"
+    "/takvim — önemli ekonomik olaylar (Fed, enflasyon...)\n"
+    "/backtest btc — bot bu varlıkta geçmişte ne kadar isabetliydi\n\n"
     "<b>📋 Takip & Alarm</b>\n"
     "/takip — listen · /takip ekle eth · /takip ekle thyao hisse · /takip sil sol\n"
     "/alarm — durum · /alarm ac · /alarm kapat · /alarm durum\n"
     "/hedef btc 60000 — fiyat hedefi · /hedef — liste · /hedef sil 3\n\n"
     "<b>💼 Portföy & Raporlar</b>\n"
     "/portfoy — kâr/zarar · /portfoy ekle btc 0.05 62000 · /portfoy ekle thyao hisse 100 300\n"
-    "/portfoy sil 2\n"
-    "/ozet — sabah özetini şimdi al · /ozet ac · /ozet kapat (her sabah 09:00)\n"
+    "/sanal — botun kendi sinyalleriyle yönettiği sanal portföy\n"
+    "/ozet — sabah özeti · /ozet ac · /ozet kapat (her sabah 09:00)\n"
     "/karne — botun tahminleri ne kadar tuttu\n\n"
-    "Komutsuz da yazabilirsin: <i>eth</i>, <i>pepe analiz</i>, <i>thyao hisse</i>, <i>bist</i>"
+    "Komutsuz da yazabilirsin: <i>eth</i>, <i>pepe analiz</i>, <i>btc kısa</i>, <i>thyao hisse</i>, <i>bist</i>\n"
+    "Analizlerin altındaki butonlarla yenileyebilir, takibe ekleyebilir, hedef koyabilirsin."
 )
+
+MENU = [
+    ("analiz", "Coin analizi (ör. /analiz eth)"), ("hisse", "BIST hissesi (ör. /hisse thyao)"),
+    ("kisa", "Kısa vade analizi (ör. /kisa btc)"), ("firsat", "Günün fırsatları taraması"),
+    ("piyasa", "Piyasa havası"), ("takvim", "Ekonomik takvim"), ("karsilastir", "Karşılaştır (ör. btc eth sol)"),
+    ("takip", "Takip listesi"), ("hedef", "Fiyat hedefleri"), ("alarm", "Alarm ayarları"),
+    ("portfoy", "Portföyüm"), ("sanal", "Botun sanal portföyü"), ("backtest", "Geçmiş isabet testi"),
+    ("karne", "Tahmin karnesi"), ("ozet", "Sabah özeti"), ("bilgi", "Coin bilgi kartı"), ("start", "Yardım"),
+]
 
 
 def load_env():
@@ -73,9 +101,9 @@ def allowed(update: Update) -> bool:
     return not ALLOWED or update.effective_chat.id in ALLOWED
 
 
-async def reply(update: Update, text: str, html_mode: bool = True):
-    await update.message.reply_text(text, parse_mode="HTML" if html_mode else None,
-                                    disable_web_page_preview=True)
+async def reply(update: Update, text: str, html_mode: bool = True, markup=None):
+    await update.effective_message.reply_text(text, parse_mode="HTML" if html_mode else None,
+                                              disable_web_page_preview=True, reply_markup=markup)
 
 
 async def run(fn, *args):
@@ -88,7 +116,7 @@ class Waiting:
         self.update, self.text, self.msg = update, text, None
 
     async def __aenter__(self):
-        self.msg = await self.update.message.reply_text(self.text)
+        self.msg = await self.update.effective_message.reply_text(self.text)
 
     async def __aexit__(self, *exc):
         try:
@@ -113,9 +141,16 @@ def split_args(words: list[str]) -> tuple[bool, list[str], list[str]]:
 
 
 # ---------------- Analiz gönderimi ----------------
-def _analyze(item: str, name: str | None, news_query: str | None):
-    ctx = compute_item(item, name)
+def _analyze(item: str, name: str | None, news_query: str | None, mode: str = "normal"):
+    ctx = compute_item(item, name, mode)
     F.record_prediction(ctx)
+    if ctx["market"] == "crypto":
+        try:
+            c = ctx["daily"]["close"]
+            chg7 = (float(c.iloc[-1]) / float(c.iloc[-8]) - 1) * 100 if mode == "normal" and len(c) > 8 else None
+            ctx["extra_sections"] = futures.section(ctx["coin"], chg7)
+        except Exception as ex:  # noqa: BLE001
+            log.warning("Vadeli işlem verisi alınamadı: %s", ex)
     extra = [x for x in [market.sentiment_line(ctx["market"])] if x]
     text = render_report(ctx, extra)
     if news_query:
@@ -127,17 +162,41 @@ def _analyze(item: str, name: str | None, news_query: str | None):
     except Exception as ex:  # noqa: BLE001
         log.warning("Grafik çizilemedi: %s", ex)
         png = None
-    return text, png
+    return text, png, ctx
 
 
-async def send_analysis(update: Update, item: str, name: str | None = None, news_query: str | None = None):
-    text, png = await run(_analyze, item, name, news_query)
+def keyboard(ctx: dict) -> InlineKeyboardMarkup:
+    """Analiz mesajının altındaki butonlar. callback_data: tür|varlık|parametre (≤64 bayt)."""
+    item, mode = ctx["item"], ctx.get("mode", "normal")
+    other = "normal" if mode == "short" else "short"
+    d, cur = ctx["d"], ctx["currency"]
+    rows = [
+        [InlineKeyboardButton("🔄 Yenile", callback_data=f"r|{item}|{mode}"),
+         InlineKeyboardButton("📅 Günlük görünüm" if mode == "short" else "⏱ Kısa vade",
+                              callback_data=f"r|{item}|{other}")],
+        [InlineKeyboardButton("➕ Takibe ekle", callback_data=f"w|{item}"),
+         InlineKeyboardButton("🧪 Geçmiş testi", callback_data=f"b|{item}")],
+    ]
+    hi, lo = d.get("swing_high"), d.get("swing_low")
+    tgt = []
+    if hi and hi > ctx["price"]:
+        tgt.append(InlineKeyboardButton(f"🎯 Direnç {cur}{fmt_num(hi)}", callback_data=f"h|{item}|{hi:.10g}"))
+    if lo and lo < ctx["price"]:
+        tgt.append(InlineKeyboardButton(f"🎯 Destek {cur}{fmt_num(lo)}", callback_data=f"h|{item}|{lo:.10g}"))
+    if tgt:
+        rows.append(tgt)
+    return InlineKeyboardMarkup(rows)
+
+
+async def send_analysis(update: Update, item: str, name: str | None = None, news_query: str | None = None,
+                        mode: str = "normal"):
+    text, png, ctx = await run(_analyze, item, name, news_query, mode)
     if png:
-        await update.message.reply_photo(png)
-    await reply(update, text)
+        await update.effective_message.reply_photo(png)
+    await reply(update, text, markup=keyboard(ctx))
 
 
-async def process_coin(update: Update, query: str, with_info: bool, with_ta: bool):
+async def process_coin(update: Update, query: str, with_info: bool, with_ta: bool, mode: str = "normal"):
     coin = None
     try:
         coin = await run(find_coin, query)
@@ -158,7 +217,7 @@ async def process_coin(update: Update, query: str, with_info: bool, with_ta: boo
             await reply(update, f"⚠️ {symbol} bilgileri şu an alınamadı (CoinGecko).", html_mode=False)
     if with_ta:
         try:
-            await send_analysis(update, symbol, name, f"{name or symbol} kripto" if with_info else None)
+            await send_analysis(update, symbol, name, f"{name or symbol} kripto" if with_info else None, mode)
         except Exception as ex:  # noqa: BLE001
             log.warning("Teknik analiz hatası (%s): %s", symbol, ex)
             msg = (f"❓ \"{query}\" adında bir coin bulamadım." if coin is None else
@@ -167,7 +226,7 @@ async def process_coin(update: Update, query: str, with_info: bool, with_ta: boo
             await reply(update, msg, html_mode=False)
 
 
-async def process_stock(update: Update, query: str):
+async def process_stock(update: Update, query: str, mode: str = "normal"):
     try:
         ticker = await run(find_stock, query)
     except Exception as ex:  # noqa: BLE001
@@ -181,6 +240,8 @@ async def process_stock(update: Update, query: str):
     news_q = None
     if code.startswith("XU"):
         name = {"XU100": "BIST 100 Endeksi", "XU030": "BIST 30 Endeksi"}.get(code, code)
+    elif mode == "short":  # kısa vadede şirket kartı ve haberler tekrar gönderilmez
+        name = None
     else:
         name, news_q = None, f"\"{code}\" hisse"
         try:
@@ -191,7 +252,7 @@ async def process_stock(update: Update, query: str):
             log.warning("Şirket bilgisi alınamadı: %s", ex)
             await reply(update, f"⚠️ {code} şirket bilgileri şu an alınamadı.", html_mode=False)
     try:
-        await send_analysis(update, f"BIST:{code}", name, news_q)
+        await send_analysis(update, f"BIST:{code}", name, news_q, mode)
     except Exception as ex:  # noqa: BLE001
         log.warning("Hisse teknik analiz hatası (%s): %s", code, ex)
         await reply(update, f"❌ {code} için teknik analiz yapılamadı (yeterli veri yok).", html_mode=False)
@@ -203,27 +264,147 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await reply(update, HELP + f"\n\nChat ID: <code>{update.effective_chat.id}</code>")
 
 
-async def run_request(update: Update, words: list[str], with_info: bool, with_ta: bool = True):
+def _mode(words) -> str:
+    return "short" if any(w.lower() in SHORT_WORDS for w in words) else "normal"
+
+
+async def run_request(update: Update, words: list[str], with_info: bool, with_ta: bool = True, mode: str = ""):
     if not allowed(update):
         return
+    mode = mode or _mode(words)
     queries = [w for w in words if w.lower() not in STOPWORDS][:MAX_ITEMS]
     default = not queries
     async with Waiting(update, "⏳ Canlı veriler alınıyor, analiz yapılıyor..."):
         for q in queries or list(COINS):
-            await process_coin(update, q, with_info=with_info and not default, with_ta=with_ta)
+            await process_coin(update, q, with_info=with_info and not default and mode == "normal",
+                               with_ta=with_ta, mode=mode)
 
 
-async def run_stock_request(update: Update, words: list[str]):
+async def run_stock_request(update: Update, words: list[str], mode: str = ""):
     if not allowed(update):
         return
+    mode = mode or _mode(words)
     queries = [w for w in words if w.lower() not in STOPWORDS][:MAX_ITEMS] or ["XU100"]
     async with Waiting(update, "⏳ Borsa verileri alınıyor, analiz yapılıyor..."):
         for q in queries:
-            await process_stock(update, q)
+            await process_stock(update, q, mode)
 
 
 async def analiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await run_request(update, context.args or [], with_info=True)
+
+
+async def kisa(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args or []
+    if not args:
+        await reply(update, "Kullanım: /kisa btc · /kisa thyao hisse", html_mode=False)
+        return
+    if any(w.lower() in STOCK_WORDS for w in args):
+        await run_stock_request(update, args, mode="short")
+    else:
+        await run_request(update, args, with_info=False, mode="short")
+
+
+async def firsat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    arg = (context.args[0].lower() if context.args else "")
+    jobs = []
+    if arg in ("", "kripto", "coin"):
+        jobs.append(scanner.crypto_report)
+    if arg in ("", "bist", "hisse", "borsa"):
+        jobs.append(scanner.bist_report)
+    async with Waiting(update, "⏳ Piyasa taranıyor (ilk seferde ~30 sn sürer)..."):
+        for fn in jobs:
+            try:
+                await reply(update, await run(fn))
+            except Exception as ex:  # noqa: BLE001
+                log.warning("Tarama hatası: %s", ex)
+                await reply(update, "⚠️ Tarama şu an yapılamadı.", html_mode=False)
+    await reply(update, scanner.FOOTER)
+
+
+async def takvim(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    await reply(update, await run(events.calendar_report))
+
+
+async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    stock, names, _ = split_args(context.args or [])
+    if not names:
+        await reply(update, "Kullanım: /backtest btc · /backtest thyao hisse", html_mode=False)
+        return
+    await run_backtest(update, names[0], stock)
+
+
+async def run_backtest(update: Update, name: str, stock: bool = False, item: str | None = None):
+    async with Waiting(update, "⏳ Geçmiş veriler üzerinde test ediliyor..."):
+        item = item or await run(F.resolve_item, name, stock)
+        if not item:
+            await reply(update, f"❓ \"{name}\" bulunamadı.", html_mode=False)
+            return
+        try:
+            await reply(update, await run(backtest.asset_report, item))
+        except Exception as ex:  # noqa: BLE001
+            log.warning("Backtest hatası (%s): %s", item, ex)
+            await reply(update, f"❌ {item} için geçmiş testi yapılamadı (yeterli veri yok).", html_mode=False)
+
+
+async def sanal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    async with Waiting(update, "⏳ Sanal portföy hesaplanıyor..."):
+        text = await run(paper.report)
+    await reply(update, text)
+
+
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Analiz mesajı altındaki butonlar."""
+    q = update.callback_query
+    if not allowed(update):
+        await q.answer()
+        return
+    parts = (q.data or "").split("|")
+    kind, item = parts[0], parts[1] if len(parts) > 1 else ""
+    if not ITEM_RE.match(item):  # callback verisi istemciden gelir; doğrula
+        await q.answer("Geçersiz istek")
+        return
+    is_bist = item.startswith("BIST:")
+    code = item.split(":", 1)[1] if is_bist else item
+    chat = update.effective_chat.id
+    if kind == "r":
+        mode = parts[2] if len(parts) > 2 and parts[2] in ("normal", "short") else "normal"
+        await q.answer("Analiz yenileniyor...")
+        async with Waiting(update, "⏳ Analiz yapılıyor..."):
+            try:
+                await send_analysis(update, item, None, None, mode)
+            except Exception as ex:  # noqa: BLE001
+                log.warning("Buton analiz hatası (%s): %s", item, ex)
+                await reply(update, f"❌ {code} analizi yapılamadı.", html_mode=False)
+    elif kind == "w":
+        await run(F.add_watch, chat, item)
+        await q.answer(f"{F.label(item)} takip listene eklendi ✅", show_alert=False)
+        await reply(update, f"✅ {F.label(item)} takip listene eklendi (alarm + sabah özeti). Liste: /takip",
+                    html_mode=False)
+    elif kind == "b":
+        await q.answer("Geçmiş testi başlatıldı...")
+        await run_backtest(update, code, is_bist, item=item)
+    elif kind == "h":
+        try:
+            target = float(parts[2])
+        except (IndexError, ValueError):
+            await q.answer("Geçersiz hedef")
+            return
+        row = await run(F.add_target, chat, item, target)
+        yon = "üstüne çıkınca" if row["direction"] == "above" else "altına inince"
+        await q.answer("Hedef kuruldu 🎯")
+        await reply(update, f"🎯 Hedef #{row['id']}: {F.label(item)} {F.money(item, target)} seviyesinin {yon} "
+                            "haber vereceğim. Liste: /hedef", html_mode=False)
+    else:
+        await q.answer()
 
 
 async def bilgi(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -424,11 +605,12 @@ async def text_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (update.message.text or "").lower().replace("/", " ").replace(",", " ")
     words = msg.split()
     names = [w for w in words if w not in STOPWORDS]
+    mode = _mode(words)
     if STOCK_WORDS & set(words):
-        await run_stock_request(update, names)
+        await run_stock_request(update, names, mode)
         return
     if "analiz" in msg or (0 < len(names) <= MAX_ITEMS and len(words) <= 5):
-        await run_request(update, names, with_info=bool(names))
+        await run_request(update, names, with_info=bool(names), mode=mode)
 
 
 # ---------------- Zamanlanmış işler ----------------
@@ -480,6 +662,72 @@ async def summary_job(context: ContextTypes.DEFAULT_TYPE):
         await send_html(context.bot, chat, text)
 
 
+async def scan_job(context: ContextTypes.DEFAULT_TYPE):
+    """Her sabah günün fırsatları (sabah özeti açık olanlara)."""
+    try:
+        chats = await run(F.recipients, "summary_on")
+    except Exception as ex:  # noqa: BLE001
+        log.warning("Tarama alıcıları okunamadı: %s", ex)
+        return
+    if not chats:
+        return
+    texts = []
+    for fn in ([scanner.crypto_report] + ([scanner.bist_report] if datetime.now(F.TR).weekday() < 5 else [])):
+        try:
+            texts.append(await run(fn))
+        except Exception as ex:  # noqa: BLE001
+            log.warning("Sabah taraması hatası: %s", ex)
+    for chat in chats:
+        for t in texts:
+            await send_html(context.bot, chat, t)
+        if texts:
+            await send_html(context.bot, chat, scanner.FOOTER)
+
+
+async def paper_job(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        text = await run(paper.run_all)
+    except Exception as ex:  # noqa: BLE001
+        log.warning("Sanal portföy hatası: %s", ex)
+        return
+    if text:
+        for chat in await run(F.recipients, "summary_on"):
+            await send_html(context.bot, chat, text)
+
+
+async def calendar_job(context: ContextTypes.DEFAULT_TYPE):
+    """Önemli ekonomik olaydan ~30 dk önce hatırlatma."""
+    try:
+        msgs = await run(events.upcoming_reminders, 30)
+        if msgs:
+            for chat in await run(F.recipients, "alerts_on"):
+                for m in msgs:
+                    await send_html(context.bot, chat, m)
+    except Exception as ex:  # noqa: BLE001
+        log.warning("Takvim işi hatası: %s", ex)
+
+
+async def kap_job(context: ContextTypes.DEFAULT_TYPE):
+    """Takip/portföydeki BIST hisseleri için KAP/şirket haberleri (hafta içi 08-20)."""
+    now = datetime.now(F.TR)
+    if now.weekday() >= 5 or not (8 <= now.hour < 20):
+        return
+    try:
+        chats = await run(F.recipients, "alerts_on")
+        per_chat = {c: [F.code_of(i) for i in await run(F.alert_items, c)
+                        if F.is_bist(i) and not F.code_of(i).startswith("XU")] for c in chats}
+        codes = sorted({x for v in per_chat.values() for x in v})
+        if not codes:
+            return
+        found = await run(events.company_news_alerts, codes)
+        for chat, cs in per_chat.items():
+            for code in cs:
+                for m in found.get(code, []):
+                    await send_html(context.bot, chat, m)
+    except Exception as ex:  # noqa: BLE001
+        log.warning("KAP işi hatası: %s", ex)
+
+
 async def keepalive_job(context: ContextTypes.DEFAULT_TYPE):
     """Render ücretsiz planda 15 dk istek gelmezse uyur; kendi adresimizi yoklayarak uyanık kalırız."""
     try:
@@ -500,20 +748,35 @@ def init_storage():
             log.warning("Ayar kaydı oluşturulamadı (%s): %s", chat, ex)
 
 
+async def set_menu(app: Application):
+    """Telegram'da '/' yazınca çıkan komut menüsü."""
+    try:
+        await app.bot.set_my_commands([BotCommand(c, d) for c, d in MENU])
+    except Exception as ex:  # noqa: BLE001
+        log.warning("Komut menüsü ayarlanamadı: %s", ex)
+
+
 def build_app() -> Application:
-    app = Application.builder().token(TOKEN).build()
+    app = Application.builder().token(TOKEN).post_init(set_menu).build()
     handlers = {
         ("start", "yardim", "help"): start, "analiz": analiz, "bilgi": bilgi, ("hisse", "bist"): hisse,
         "piyasa": piyasa, ("karsilastir", "kiyasla"): karsilastir, "takip": takip, "alarm": alarm,
         "hedef": hedef, ("portfoy", "portfolio"): portfoy, "ozet": ozet, "karne": karne,
+        "kisa": kisa, ("firsat", "firsatlar", "tara"): firsat, "takvim": takvim, "backtest": backtest_cmd,
+        "sanal": sanal,
     }
     for names, fn in handlers.items():
         app.add_handler(CommandHandler(list(names) if isinstance(names, tuple) else names, fn))
+    app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_trigger))
     jq = app.job_queue
     jq.run_repeating(alert_job, interval=CHECK_EVERY, first=30, name="alerts")
     jq.run_repeating(resolve_job, interval=3600, first=120, name="resolve")
+    jq.run_repeating(calendar_job, interval=600, first=90, name="calendar")
+    jq.run_repeating(kap_job, interval=1200, first=150, name="kap")
     jq.run_daily(summary_job, time=SUMMARY_TIME, name="summary")
+    jq.run_daily(scan_job, time=SCAN_TIME, name="scan")
+    jq.run_daily(paper_job, time=PAPER_TIME, name="paper")
     return app
 
 
@@ -552,6 +815,7 @@ async def run_webhook_server(app: Application, base_url: str):
                                   allowed_updates=Update.ALL_TYPES)
         app.job_queue.run_repeating(keepalive_job, interval=600, first=60,
                                     data=base_url + "/health", name="keepalive")
+        await set_menu(app)  # post_init yalnızca run_polling/run_webhook'ta çağrılır
         await app.start()
         log.info("Webhook modunda çalışıyor: %s (port %s)", base_url, port)
         await server.serve()
