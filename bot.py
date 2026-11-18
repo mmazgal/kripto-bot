@@ -14,7 +14,7 @@ from datetime import datetime
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler,
-                          filters)
+                          TypeHandler, filters)
 
 import alerts
 import backtest
@@ -44,6 +44,7 @@ CHECK_EVERY = 300          # sn: alarm kontrol sıklığı
 SUMMARY_TIME = dtime(9, 0, tzinfo=F.TR)
 SCAN_TIME = dtime(9, 5, tzinfo=F.TR)
 PAPER_TIME = dtime(9, 15, tzinfo=F.TR)
+DAILY_DEADLINE = (12, 0)   # sunucu uyuyup/yeniden başlayıp saati kaçırırsa bu saate kadar telafi edilir
 ITEM_RE = re.compile(r"^(BIST:)?[A-Z0-9]{1,15}$")
 
 HELP = (
@@ -657,6 +658,7 @@ async def summary_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception as ex:  # noqa: BLE001
         log.warning("Özet alıcıları okunamadı: %s", ex)
         return
+    log.info("Sabah özeti %d sohbete gönderiliyor", len(chats))
     for chat in chats:
         text = await run(F.morning_summary, chat)
         await send_html(context.bot, chat, text)
@@ -737,6 +739,49 @@ async def keepalive_job(context: ContextTypes.DEFAULT_TYPE):
         log.warning("Keepalive hatası: %s", ex)
 
 
+# ---------------- Sohbet kaydı ve günlük işler ----------------
+_registered: set[int] = set()
+
+
+async def register_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Bota yazan her sohbeti (sadece /start değil) alarm/özet alıcısı olarak kaydeder."""
+    chat = update.effective_chat
+    if not chat or chat.id in _registered or not allowed(update):
+        return
+    try:
+        await run(F.ensure_chat, chat.id)
+        _registered.add(chat.id)
+    except Exception as ex:  # noqa: BLE001
+        log.warning("Sohbet kaydedilemedi (%s): %s", chat.id, ex)
+
+
+_daily_done: dict[str, str] = {}
+
+
+async def daily_dispatch(context: ContextTypes.DEFAULT_TYPE):
+    """Her dakika: saati gelmiş ama bugün henüz çalışmamış günlük işleri çalıştırır.
+    run_daily yerine bu kullanılır; sunucu 09:00'da uyuyor/yeniden başlıyorsa iş kaçmaz,
+    veritabanındaki işaret sayesinde yeniden başlatmada iki kez de gönderilmez."""
+    now = datetime.now(F.TR)
+    today = now.date().isoformat()
+    for name, t, fn in (("summary", SUMMARY_TIME, summary_job), ("scan", SCAN_TIME, scan_job),
+                        ("paper", PAPER_TIME, paper_job)):
+        if _daily_done.get(name) == today:
+            continue
+        if not ((t.hour, t.minute) <= (now.hour, now.minute) < DAILY_DEADLINE):
+            continue
+        _daily_done[name] = today
+        key = f"daily:{name}:{today}"
+        if await run(events.already_notified, key):
+            continue
+        await run(events.mark_notified, key)
+        log.info("Günlük iş çalışıyor: %s", name)
+        try:
+            await fn(context)
+        except Exception as ex:  # noqa: BLE001
+            log.warning("Günlük iş hatası (%s): %s", name, ex)
+
+
 # ---------------- Başlatma ----------------
 def init_storage():
     import store
@@ -765,6 +810,7 @@ def build_app() -> Application:
         "kisa": kisa, ("firsat", "firsatlar", "tara"): firsat, "takvim": takvim, "backtest": backtest_cmd,
         "sanal": sanal,
     }
+    app.add_handler(TypeHandler(Update, register_chat), group=-1)
     for names, fn in handlers.items():
         app.add_handler(CommandHandler(list(names) if isinstance(names, tuple) else names, fn))
     app.add_handler(CallbackQueryHandler(on_button))
@@ -774,9 +820,7 @@ def build_app() -> Application:
     jq.run_repeating(resolve_job, interval=3600, first=120, name="resolve")
     jq.run_repeating(calendar_job, interval=600, first=90, name="calendar")
     jq.run_repeating(kap_job, interval=1200, first=150, name="kap")
-    jq.run_daily(summary_job, time=SUMMARY_TIME, name="summary")
-    jq.run_daily(scan_job, time=SCAN_TIME, name="scan")
-    jq.run_daily(paper_job, time=PAPER_TIME, name="paper")
+    jq.run_repeating(daily_dispatch, interval=60, first=20, name="daily")
     return app
 
 
