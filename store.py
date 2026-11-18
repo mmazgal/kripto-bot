@@ -88,7 +88,15 @@ def _match(row, filters):
 # ---------------- Ortak API ----------------
 def select(table, filters=None, order=None):
     if using_supabase():
-        return _sb("GET", table, filters, extra_params={"select": "*", **({"order": order} if order else {})})
+        # Supabase tek istekte en fazla 1000 satır döndürür; hepsini sayfa sayfa al
+        order = order or (None if table in _NO_ID else "id.asc")
+        rows, page = [], 1000
+        while True:
+            chunk = _sb("GET", table, filters, extra_params={
+                "select": "*", "limit": page, "offset": len(rows), **({"order": order} if order else {})})
+            rows += chunk
+            if len(chunk) < page:
+                return rows
     with _lock:
         rows = [r for r in _load().get(table, []) if _match(r, filters)]
     if order:

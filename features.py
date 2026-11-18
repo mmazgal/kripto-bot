@@ -7,6 +7,7 @@ import data  # noqa: F401  (SSL ayarları)
 
 import html
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
@@ -61,13 +62,15 @@ def resolve_item(word: str, stock: bool) -> str | None:
         t = find_stock(word)
         return f"BIST:{t.removesuffix('.IS')}" if t else None
     from coininfo import find_coin
+    code = word.upper()
     try:
         c = find_coin(word)
-        if c:
-            return c["symbol"].upper()
-    except Exception as ex:  # noqa: BLE001
+        if not c:
+            return None  # bilinmeyen coin/yazım hatası listeye kaydedilmesin
+        code = c["symbol"].upper()
+    except Exception as ex:  # noqa: BLE001  (arama servisi çöktüyse yazılanı kabul et)
         log.warning("Coin arama hatası: %s", ex)
-    return word.upper()
+    return code if re.fullmatch(r"[A-Z0-9]{1,15}", code) else None
 
 
 # ---------------- Ayarlar / alıcılar ----------------

@@ -84,6 +84,7 @@ def run_market(mk: str) -> list[str]:
             proceeds = qty * price * (1 - FEE)
             pnl = proceeds - qty * entry
             cash += proceeds
+            store.update("paper_state", {"cash": cash}, {"market": mk})  # her işlemde nakdi hemen yaz
             store.delete("paper_positions", {"market": mk, "item": it})
             store.insert("paper_trades", {"market": mk, "item": it, "side": "SAT", "qty": qty, "price": price,
                                           "at": _now(), "reason": f"skor {s:+.2f}", "pnl": pnl})
@@ -95,7 +96,9 @@ def run_market(mk: str) -> list[str]:
             spend = min(slot, cash)
             qty = spend * (1 - FEE) / price
             cash -= spend
-            store.insert("paper_positions", {"market": mk, "item": it, "qty": qty, "entry_price": price,
+            store.update("paper_state", {"cash": cash}, {"market": mk})
+            # maliyet = ödenen tutar / adet (alış komisyonu dahil) → kâr/zarar ve % doğru hesaplanır
+            store.insert("paper_positions", {"market": mk, "item": it, "qty": qty, "entry_price": spend / qty,
                                              "entry_at": _now()}, upsert=True)
             store.insert("paper_trades", {"market": mk, "item": it, "side": "AL", "qty": qty, "price": price,
                                           "at": _now(), "reason": f"skor {s:+.2f}", "pnl": None})

@@ -223,14 +223,6 @@ def analyze_frame(df) -> dict:
     return out
 
 
-def confidence(agreement: int, n: int = 6) -> str:
-    if agreement >= 5:
-        return "Yüksek"
-    if agreement >= 4:
-        return "Orta"
-    return "Düşük"
-
-
 def forecast(price: float, score: float, daily_vol: float, days: int) -> dict:
     """Skor + tarihsel volatiliteye göre beklenen fiyat aralığı (~%68 güven bandı)."""
     sigma = daily_vol * math.sqrt(days)

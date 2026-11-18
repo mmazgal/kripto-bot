@@ -45,6 +45,7 @@ SUMMARY_TIME = dtime(9, 0, tzinfo=F.TR)
 SCAN_TIME = dtime(9, 5, tzinfo=F.TR)
 PAPER_TIME = dtime(9, 15, tzinfo=F.TR)
 DAILY_DEADLINE = (12, 0)   # sunucu uyuyup/yeniden başlayıp saati kaçırırsa bu saate kadar telafi edilir
+NOT_EDITED = ~filters.UpdateType.EDITED  # mesaj düzenlenince komut tekrar çalışmasın
 ITEM_RE = re.compile(r"^(BIST:)?[A-Z0-9]{1,15}$")
 
 HELP = (
@@ -95,16 +96,38 @@ def load_env():
 load_env()
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 ALLOWED = {int(x) for x in os.environ.get("ALLOWED_CHAT_IDS", "").replace(" ", "").split(",") if x}
-ENV_ALERT_CHATS = {int(x) for x in os.environ.get("ALERT_CHAT_IDS", "").replace(" ", "").split(",") if x}
 
 
 def allowed(update: Update) -> bool:
     return not ALLOWED or update.effective_chat.id in ALLOWED
 
 
+def chunks(text: str, limit: int = 4000) -> list[str]:
+    """Telegram 4096 karakter sınırı: uzun metni satır sınırlarından böler (HTML etiketleri satır içinde kapanır)."""
+    out, cur = [], ""
+    for line in text.split("\n"):
+        while len(line) > limit:  # tek satır bile çok uzunsa
+            if cur:
+                out.append(cur)
+                cur = ""
+            out.append(line[:limit])
+            line = line[limit:]
+        if cur and len(cur) + 1 + len(line) > limit:
+            out.append(cur)
+            cur = line
+        else:
+            cur = f"{cur}\n{line}" if cur else line
+    if cur:
+        out.append(cur)
+    return out or [""]
+
+
 async def reply(update: Update, text: str, html_mode: bool = True, markup=None):
-    await update.effective_message.reply_text(text, parse_mode="HTML" if html_mode else None,
-                                              disable_web_page_preview=True, reply_markup=markup)
+    parts = chunks(text)
+    for i, part in enumerate(parts):
+        await update.effective_message.reply_text(part, parse_mode="HTML" if html_mode else None,
+                                                  disable_web_page_preview=True,
+                                                  reply_markup=markup if i == len(parts) - 1 else None)
 
 
 async def run(fn, *args):
@@ -261,6 +284,8 @@ async def process_stock(update: Update, query: str, mode: str = "normal"):
 
 # ---------------- Komutlar: analiz ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
     await run(F.ensure_chat, update.effective_chat.id)
     await reply(update, HELP + f"\n\nChat ID: <code>{update.effective_chat.id}</code>")
 
@@ -410,7 +435,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def bilgi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Kullanım: /bilgi eth")
+        await update.effective_message.reply_text("Kullanım: /bilgi eth")
         return
     await run_request(update, context.args, with_info=True, with_ta=False)
 
@@ -478,21 +503,20 @@ async def alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     arg = (context.args[0].lower() if context.args else "")
     if arg in ("ac", "aç", "on"):
         await run(lambda: F.set_setting(chat, alerts_on=True))
-        await update.message.reply_text("✅ Alarmlar açıldı. Eşik aşılınca buraya mesaj gelecek.")
+        await update.effective_message.reply_text("✅ Alarmlar açıldı. Eşik aşılınca buraya mesaj gelecek.")
     elif arg in ("kapat", "off"):
         await run(lambda: F.set_setting(chat, alerts_on=False))
-        await update.message.reply_text("🔕 Alarmlar kapatıldı. Tekrar açmak için /alarm ac")
+        await update.effective_message.reply_text("🔕 Alarmlar kapatıldı. Tekrar açmak için /alarm ac")
     elif arg in ("durum", "test"):
         async with Waiting(update, "⏳ Takip listesi kontrol ediliyor..."):
             items = await run(F.alert_items, chat)
             lines = await run(lambda: alerts.check_all(True, items))
-        await update.message.reply_text(
-            "📋 Anlık durum (alarm eşikleri: 15dk ±%{}, 1s ±%{}, hacim {}x)\n\n{}".format(
-                alerts.DROP_15M, alerts.DROP_1H, alerts.VOLUME_X, "\n".join(lines)))
+        await reply(update, "📋 Anlık durum (alarm eşikleri: 15dk ±%{}, 1s ±%{}, hacim {}x)\n\n{}".format(
+            alerts.DROP_15M, alerts.DROP_1H, alerts.VOLUME_X, "\n".join(lines)), html_mode=False)
     else:
         s = await run(F.get_settings, chat)
         items = await run(F.alert_items, chat)
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             f"🚨 Alarmlar: {'AÇIK ✅' if s.get('alerts_on') else 'KAPALI 🔕'}\n"
             f"İzlenenler (takip listesi + portföy): {', '.join(F.label(i) for i in items)}\n"
             f"Kontrol sıklığı: {CHECK_EVERY // 60} dakikada bir\n\n"
@@ -584,11 +608,11 @@ async def ozet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     arg = (context.args[0].lower() if context.args else "")
     if arg in ("ac", "aç", "on"):
         await run(lambda: F.set_setting(chat, summary_on=True))
-        await update.message.reply_text("☀️ Sabah özeti açıldı: her gün 09:00'da gelecek.")
+        await update.effective_message.reply_text("☀️ Sabah özeti açıldı: her gün 09:00'da gelecek.")
         return
     if arg in ("kapat", "off"):
         await run(lambda: F.set_setting(chat, summary_on=False))
-        await update.message.reply_text("🔕 Sabah özeti kapatıldı. Açmak için /ozet ac")
+        await update.effective_message.reply_text("🔕 Sabah özeti kapatıldı. Açmak için /ozet ac")
         return
     async with Waiting(update, "⏳ Özet hazırlanıyor..."):
         text = await run(F.morning_summary, chat)
@@ -603,7 +627,7 @@ async def karne(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def text_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """'eth', 'pepe analiz', 'thyao hisse', 'bist' gibi düz mesajları yakalar."""
-    msg = (update.message.text or "").lower().replace("/", " ").replace(",", " ")
+    msg = (update.effective_message.text or "").lower().replace("/", " ").replace(",", " ")
     words = msg.split()
     names = [w for w in words if w not in STOPWORDS]
     mode = _mode(words)
@@ -617,7 +641,8 @@ async def text_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------- Zamanlanmış işler ----------------
 async def send_html(bot, chat: int, text: str):
     try:
-        await bot.send_message(chat, text, parse_mode="HTML", disable_web_page_preview=True)
+        for part in chunks(text):
+            await bot.send_message(chat, part, parse_mode="HTML", disable_web_page_preview=True)
     except Exception as ex:  # noqa: BLE001
         log.warning("Mesaj gönderilemedi (%s): %s", chat, ex)
 
@@ -660,7 +685,11 @@ async def summary_job(context: ContextTypes.DEFAULT_TYPE):
         return
     log.info("Sabah özeti %d sohbete gönderiliyor", len(chats))
     for chat in chats:
-        text = await run(F.morning_summary, chat)
+        try:  # bir sohbetteki hata diğerlerini engellemesin
+            text = await run(F.morning_summary, chat)
+        except Exception as ex:  # noqa: BLE001
+            log.warning("Sabah özeti hazırlanamadı (%s): %s", chat, ex)
+            continue
         await send_html(context.bot, chat, text)
 
 
@@ -786,11 +815,6 @@ async def daily_dispatch(context: ContextTypes.DEFAULT_TYPE):
 def init_storage():
     import store
     log.info("Veri deposu: %s", "Supabase" if store.using_supabase() else "yerel store.json")
-    for chat in ENV_ALERT_CHATS:  # eski ALERT_CHAT_IDS ayarını veritabanına taşı
-        try:
-            F.ensure_chat(chat)
-        except Exception as ex:  # noqa: BLE001
-            log.warning("Ayar kaydı oluşturulamadı (%s): %s", chat, ex)
 
 
 async def set_menu(app: Application):
@@ -812,9 +836,10 @@ def build_app() -> Application:
     }
     app.add_handler(TypeHandler(Update, register_chat), group=-1)
     for names, fn in handlers.items():
-        app.add_handler(CommandHandler(list(names) if isinstance(names, tuple) else names, fn))
+        app.add_handler(CommandHandler(list(names) if isinstance(names, tuple) else names, fn,
+                                       filters=NOT_EDITED))
     app.add_handler(CallbackQueryHandler(on_button))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_trigger))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & NOT_EDITED, text_trigger))
     jq = app.job_queue
     jq.run_repeating(alert_job, interval=CHECK_EVERY, first=30, name="alerts")
     jq.run_repeating(resolve_job, interval=3600, first=120, name="resolve")
@@ -856,7 +881,7 @@ async def run_webhook_server(app: Application, base_url: str):
 
     async with app:
         await app.bot.set_webhook(base_url + "/webhook", secret_token=secret,
-                                  allowed_updates=Update.ALL_TYPES)
+                                  allowed_updates=["message", "callback_query"])
         app.job_queue.run_repeating(keepalive_job, interval=600, first=60,
                                     data=base_url + "/health", name="keepalive")
         await set_menu(app)  # post_init yalnızca run_polling/run_webhook'ta çağrılır

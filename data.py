@@ -49,7 +49,7 @@ def _binance(symbol: str, interval: str, limit: int) -> pd.DataFrame:
 
 
 def _bybit(symbol: str, interval: str, limit: int) -> pd.DataFrame:
-    iv = {"1d": "D", "1w": "W", "4h": "240"}[interval]
+    iv = {"1d": "D", "1w": "W", "4h": "240", "1h": "60", "15m": "15", "5m": "5"}[interval]
     r = requests.get(
         "https://api.bybit.com/v5/market/kline",
         params={"category": "spot", "symbol": symbol, "interval": iv, "limit": min(limit, 1000)},
