@@ -4,6 +4,7 @@ Komutlar için /start yazın. Düz mesajlar da çalışır: "eth", "thyao hisse"
 """
 import data  # noqa: F401  (SSL ayarını telegram/httpx'ten önce yapar)
 import asyncio
+import html
 import logging
 import os
 from datetime import time as dtime
@@ -286,8 +287,11 @@ async def process_stock(update: Update, query: str, mode: str = "normal"):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return
-    await run(F.ensure_chat, update.effective_chat.id)
-    await reply(update, HELP + f"\n\nChat ID: <code>{update.effective_chat.id}</code>")
+    try:
+        await run(F.ensure_chat, update.effective_chat.id)
+    except Exception as ex:  # noqa: BLE001
+        log.warning("Sohbet kaydedilemedi: %s", ex)
+    await reply(update, HELP + f"\n\nChat ID: <code>{update.effective_chat.id}</code>" + html.escape(db_warning(), quote=False))
 
 
 def _mode(words) -> str:
@@ -501,12 +505,16 @@ async def alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     chat = update.effective_chat.id
     arg = (context.args[0].lower() if context.args else "")
-    if arg in ("ac", "aç", "on"):
-        await run(lambda: F.set_setting(chat, alerts_on=True))
-        await update.effective_message.reply_text("✅ Alarmlar açıldı. Eşik aşılınca buraya mesaj gelecek.")
-    elif arg in ("kapat", "off"):
-        await run(lambda: F.set_setting(chat, alerts_on=False))
-        await update.effective_message.reply_text("🔕 Alarmlar kapatıldı. Tekrar açmak için /alarm ac")
+    if arg in ("ac", "aç", "on", "kapat", "off"):
+        on = arg in ("ac", "aç", "on")
+        await run(lambda: F.set_setting(chat, alerts_on=on))
+        saved = bool((await run(F.get_settings, chat)).get("alerts_on"))  # gerçekten kaydedildi mi?
+        if saved != on:
+            await reply(update, "⚠️ Ayar kaydedilemedi." + db_warning(), html_mode=False)
+        elif on:
+            await update.effective_message.reply_text("✅ Alarmlar açıldı. Eşik aşılınca buraya mesaj gelecek.")
+        else:
+            await update.effective_message.reply_text("🔕 Alarmlar kapatıldı. Tekrar açmak için /alarm ac")
     elif arg in ("durum", "test"):
         async with Waiting(update, "⏳ Takip listesi kontrol ediliyor..."):
             items = await run(F.alert_items, chat)
@@ -525,7 +533,7 @@ async def alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Yüksek hacim: son 15 dk hacmi normalin {alerts.VOLUME_X} katı\n"
             "• Teknik sinyal: günlük SAR trend dönüşü, RSI 30/70 geçişi\n"
             "• Fiyat hedefleri: /hedef\n\n"
-            "/alarm ac · /alarm kapat · /alarm durum (anlık ölçümler)")
+            "/alarm ac · /alarm kapat · /alarm durum (anlık ölçümler)" + db_warning())
 
 
 async def hedef(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -812,9 +820,31 @@ async def daily_dispatch(context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------- Başlatma ----------------
+DB_PROBLEM: str | None = None
+
+
+def db_warning() -> str:
+    return f"\n\n⚠️ Veritabanı sorunu: {DB_PROBLEM}" if DB_PROBLEM else ""
+
+
 def init_storage():
+    global DB_PROBLEM
     import store
     log.info("Veri deposu: %s", "Supabase" if store.using_supabase() else "yerel store.json")
+    DB_PROBLEM = store.diagnose()
+    if DB_PROBLEM:
+        log.error("VERİTABANI SORUNU: %s", DB_PROBLEM)
+
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Komut hata verirse sessiz kalma: kullanıcıya kısa bir hata mesajı gönder."""
+    log.error("İşlenmeyen hata: %s", context.error, exc_info=context.error)
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                f"⚠️ Bir hata oluştu: {type(context.error).__name__}: {str(context.error)[:300]}" + db_warning())
+        except Exception:  # noqa: BLE001
+            pass
 
 
 async def set_menu(app: Application):
@@ -839,6 +869,7 @@ def build_app() -> Application:
         app.add_handler(CommandHandler(list(names) if isinstance(names, tuple) else names, fn,
                                        filters=NOT_EDITED))
     app.add_handler(CallbackQueryHandler(on_button))
+    app.add_error_handler(on_error)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & NOT_EDITED, text_trigger))
     jq = app.job_queue
     jq.run_repeating(alert_job, interval=CHECK_EVERY, first=30, name="alerts")

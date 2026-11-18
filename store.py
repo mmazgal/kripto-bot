@@ -25,11 +25,37 @@ def using_supabase() -> bool:
     return bool(_env("SUPABASE_URL") and _env("SUPABASE_KEY"))
 
 
+def diagnose() -> str | None:
+    """Veritabanı ayarında sorun varsa kullanıcıya gösterilecek açıklama, yoksa None."""
+    if not using_supabase():
+        return None
+    key = _env("SUPABASE_KEY")
+    if key.startswith("sb_publishable_"):
+        return ("SUPABASE_KEY olarak 'publishable' (herkese açık) anahtar girilmiş; bununla kayıt okunamaz/yazılamaz. "
+                "Supabase > Project Settings > API Keys'teki 'secret' anahtarı (sb_secret_...) girilmeli.")
+    if key.count(".") == 2:  # eski tip JWT anahtar: içindeki rolü oku
+        import base64
+        try:
+            part = key.split(".")[1]
+            role = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4))).get("role")
+        except Exception:  # noqa: BLE001
+            role = None
+        if role and role != "service_role":
+            return (f"SUPABASE_KEY olarak '{role}' anahtarı girilmiş; bununla kayıt okunamaz/yazılamaz. "
+                    "Supabase > Project Settings > API Keys'teki 'service_role' (secret) anahtarı girilmeli.")
+    try:
+        _sb("GET", "settings", extra_params={"select": "chat_id", "limit": 1})
+    except Exception as ex:  # noqa: BLE001
+        return f"Supabase'e erişilemiyor: {ex}"
+    return None
+
+
 # ---------------- Supabase ----------------
 def _sb_headers(extra=None):
     key = _env("SUPABASE_KEY")
-    h = {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json",
-         "Prefer": "return=representation"}
+    h = {"apikey": key, "Content-Type": "application/json", "Prefer": "return=representation"}
+    if not key.startswith("sb_"):  # yeni tip (sb_secret_) anahtarlar yalnız apikey başlığıyla gönderilir
+        h["Authorization"] = f"Bearer {key}"
     if extra:
         h.update(extra)
     return h
