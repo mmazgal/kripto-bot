@@ -27,14 +27,14 @@ Tamamen ücretsiz servislerle çalışır: Render (sunucu), Supabase (veritaban�
 | 💼 | **Portföy** | Kâr/zarar takibi; kripto ($) + BIST (₺) ve TL cinsinden genel toplam |
 | 📒 | **Tahmin karnesi** | Bot her tahminini kaydeder, süresi dolunca doğruluğunu ölçer |
 | 🧪 | **Geriye dönük test** | Puanlama sistemi geçmiş 2-5 yılda ne kadar isabetliydi; strateji vs al-ve-tut |
-| 🔎 | **Günün fırsatları** | Her sabah ilk 100 coin + BIST 100 taranır, öne çıkan sinyaller listelenir |
+| 🔎 | **Günün fırsatları** | Her sabah 09:05'te ilk 100 coin + BIST 100 taranır, öne çıkan sinyaller listelenir |
 | ↔️ | **Uyumsuzluk (divergence)** | Fiyat ile RSI/MACD arasındaki pozitif/negatif uyumsuzluklar |
-| 📢 | **KAP / şirket haberleri** | Takipteki hisseler için KAP bildirimi haberleri anında |
+| 📢 | **KAP / şirket haberleri** | Takipteki hisseler için KAP bildirimi haberleri (hafta içi 08-20, 20 dk'da bir kontrol) |
 | 📅 | **Ekonomik takvim** | Fed, ABD enflasyon/istihdam, ECB, Çin; olaydan 30 dk önce hatırlatma |
 | 💸 | **Vadeli işlem verileri** | Fonlama oranı, açık pozisyon, long/short oranı; aşırı fonlama alarmı |
 | ⏱ | **Kısa vade modu** | 1 saatlik + 4 saatlik grafik, 24 saat / 3 gün tahmini |
 | 🔘 | **Butonlar ve menü** | Analiz altında Yenile / Kısa vade / Takibe ekle / Geçmiş testi / Hedef butonları |
-| 🤖 | **Sanal portföy** | Bot kendi sinyalleriyle sanal parayla işlem yapar, al-ve-tut ile kıyaslanır |
+| 🤖 | **Sanal portföy** | Bot her sabah 09:15'te kendi sinyalleriyle sanal parayla işlem yapar, al-ve-tut ile kıyaslanır |
 
 ---
 
@@ -145,7 +145,7 @@ Süresi dolan tahmin saatlik olarak gerçek fiyatla karşılaştırılır:
 
 | Dosya | Görevi |
 |---|---|
-| `bot.py` | Telegram komutları, zamanlanmış işler (alarm, özet, karne), webhook sunucusu |
+| `bot.py` | Telegram komutları, butonlar, zamanlanmış işler (alarm, özet, karne, tarama, sanal portföy, takvim, KAP), webhook sunucusu |
 | `analysis.py` | Gösterge puanlama, tahmin, rapor metni (`python analysis.py eth` ile terminalden test) |
 | `indicators.py` | Gösterge formülleri (harici TA kütüphanesi yok) |
 | `charts.py` | Grafik görseli (matplotlib) |
