@@ -39,8 +39,13 @@ VERİLER:
 {data}"""
 
 
+def _key() -> str:
+    """Anahtar; kopyalarken gelen boşluk/tırnak/satır sonu temizlenir."""
+    return os.getenv("GEMINI_API_KEY", "").strip().strip("\"'").strip()
+
+
 def enabled() -> bool:
-    return bool(os.getenv("GEMINI_API_KEY"))
+    return bool(_key())
 
 
 def _strip_html(s: str) -> str:
@@ -84,7 +89,7 @@ def _context_text(ctx: dict, extra_lines: list[str], news_titles: list[str]) -> 
 
 def _call(model: str, prompt: str) -> str:
     r = requests.post(URL.format(model=model),
-                      headers={"x-goog-api-key": os.environ["GEMINI_API_KEY"]},
+                      headers={"x-goog-api-key": _key()},
                       json={"contents": [{"parts": [{"text": prompt}]}],
                             "generationConfig": {"temperature": 0.4, "maxOutputTokens": 2048}},
                       timeout=25)
@@ -141,13 +146,17 @@ last_error: str | None = None  # /yz komutu gösterir
 
 def diagnose() -> str:
     """/yz: anahtar var mı, hangi model çalışıyor — kısa bir deneme isteğiyle (düz metin)."""
-    key = os.getenv("GEMINI_API_KEY", "")
+    raw = os.getenv("GEMINI_API_KEY", "")
+    key = _key()
     if not key:
         return ("❌ GEMINI_API_KEY bulunamadı. Render > Environment'a ekleyip kaydettikten sonra "
                 "servisin yeniden başladığından emin ol.")
     L = [f"🔑 Anahtar var ({key[:4]}…{key[-4:]}, {len(key)} karakter)"]
-    if key != key.strip() or not key.startswith("AIza"):
-        L.append("⚠️ Anahtar 'AIza' ile başlamıyor ya da başında/sonunda boşluk var — kopyalamayı kontrol et.")
+    if raw != key:
+        L.append("ℹ️ Anahtarın başında/sonunda boşluk veya tırnak vardı; bot bunları otomatik temizliyor.")
+    if not key.startswith("AIza"):
+        L.append("⚠️ Anahtar 'AIza' ile başlamıyor (büyük I, küçük z-a). Yanlış değer kopyalanmış olabilir; "
+                 "aşağıdaki model satırları ✅ ise sorun yok.")
     for model in MODELS:
         try:
             out = _call(model, "Sadece 'tamam' yaz.")
