@@ -90,7 +90,12 @@ def _call(model: str, prompt: str) -> str:
                       timeout=25)
     if r.status_code == 404:
         _bad_models.add(model)  # model adı kalkmış/değişmiş: bir sonrakini dene
-    r.raise_for_status()
+    if r.status_code >= 400:  # Google'ın açıklamasını loga taşı (anahtar yanıtta yer almaz)
+        try:
+            detail = r.json().get("error", {}).get("message", "")
+        except ValueError:
+            detail = r.text
+        raise RuntimeError(f"HTTP {r.status_code}: {detail[:300]}")
     cand = (r.json().get("candidates") or [{}])[0]
     parts = (cand.get("content") or {}).get("parts") or []
     return "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
@@ -114,20 +119,44 @@ def comment(ctx: dict, extra_lines: list[str] | None = None, news_titles: list[s
     if hit and time.time() - hit[0] < CACHE_TTL:
         return hit[1]
     prompt = PROMPT.format(data=_context_text(ctx, extra_lines or [], news_titles or []))
-    for model in MODELS:
+    global last_error
+    for model in MODELS:  # her hatada (kota modele özel olabilir) sıradaki modeli dene
         if model in _bad_models:
             continue
         try:
             text = _clean(_call(model, prompt))
             if text:
                 _cache[key] = (time.time(), text)
+                last_error = None
                 return text
+            last_error = f"{model}: boş yanıt"
         except Exception as ex:  # noqa: BLE001
-            msg = str(ex).replace(os.environ.get("GEMINI_API_KEY", "") or "\0", "***")
-            log.warning("Gemini yorumu alınamadı (%s): %s", model, msg)
-            if "429" in msg:  # kota doldu: diğer modeli de zorlamadan çık
-                return None
+            last_error = f"{model}: " + str(ex).replace(os.environ.get("GEMINI_API_KEY", "") or "\0", "***")
+        log.warning("Gemini yorumu alınamadı: %s", last_error)
     return None
+
+
+last_error: str | None = None  # /yz komutu gösterir
+
+
+def diagnose() -> str:
+    """/yz: anahtar var mı, hangi model çalışıyor — kısa bir deneme isteğiyle (düz metin)."""
+    key = os.getenv("GEMINI_API_KEY", "")
+    if not key:
+        return ("❌ GEMINI_API_KEY bulunamadı. Render > Environment'a ekleyip kaydettikten sonra "
+                "servisin yeniden başladığından emin ol.")
+    L = [f"🔑 Anahtar var ({key[:4]}…{key[-4:]}, {len(key)} karakter)"]
+    if key != key.strip() or not key.startswith("AIza"):
+        L.append("⚠️ Anahtar 'AIza' ile başlamıyor ya da başında/sonunda boşluk var — kopyalamayı kontrol et.")
+    for model in MODELS:
+        try:
+            out = _call(model, "Sadece 'tamam' yaz.")
+            L.append(f"✅ {model}: çalışıyor ({out[:30]!r})")
+        except Exception as ex:  # noqa: BLE001
+            L.append(f"❌ {model}: " + str(ex).replace(key, "***"))
+    if last_error:
+        L.append(f"Son analizdeki hata: {last_error}")
+    return "\n".join(L)
 
 
 if __name__ == "__main__":

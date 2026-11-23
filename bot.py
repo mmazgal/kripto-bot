@@ -363,6 +363,13 @@ async def takvim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await reply(update, await run(events.calendar_report))
 
 
+async def yz(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Yapay zekâ (Gemini) bağlantı testi."""
+    if not allowed(update):
+        return
+    await reply(update, "🤖 Yapay zekâ testi\n\n" + await run(ai.diagnose), html_mode=False)
+
+
 async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return
@@ -865,7 +872,7 @@ def build_app() -> Application:
         "piyasa": piyasa, ("karsilastir", "kiyasla"): karsilastir, "takip": takip, "alarm": alarm,
         "hedef": hedef, ("portfoy", "portfolio"): portfoy, "ozet": ozet, "karne": karne,
         "kisa": kisa, ("firsat", "firsatlar", "tara"): firsat, "takvim": takvim, "backtest": backtest_cmd,
-        "sanal": sanal,
+        "sanal": sanal, ("yz", "ai"): yz,
     }
     app.add_handler(TypeHandler(Update, register_chat), group=-1)
     for names, fn in handlers.items():

@@ -76,6 +76,7 @@ Tamamen ücretsiz servislerle çalışır: Render (sunucu), Supabase (veritaban�
 | `/ozet` · `/ozet ac` · `/ozet kapat` | Sabah özetini şimdi al / her gün 09:00'da aç-kapat |
 | `/karne` | Geçmiş tahminlerin yön doğruluğu ve aralık isabeti |
 | `/sanal` | Botun sanal portföyü (kripto $10k, BIST ₺100k ile başladı) |
+| `/yz` | Yapay zekâ (Gemini) bağlantı testi: anahtar var mı, hangi model çalışıyor, son hata |
 | `/start` | Tüm komutlar + chat ID |
 
 ### Komutsuz kullanım
