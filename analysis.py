@@ -351,6 +351,13 @@ def render_report(ctx: dict, extra_lines: list[str] | None = None) -> str:
     L.append(f"<b>{lb['h2']}:</b> {score_label(month_score)} (skor {month_score:+.2f}, gösterge uyumu: {w['agreement']}/6)")
     L.append(f"   Hedef ≈ {fmt_price(fm['center'])} ({fm['pct']:+.1f}%) · Aralık {fmt_price(fm['low'])} – {fmt_price(fm['high'])}")
     L.append("")
+    if ctx.get("ai_comment"):  # Gemini yorumu (ai.py); yoksa kural tabanlı yorum
+        L.append("<b>🤖 Yapay Zekâ Yorumu</b>")
+        L.append(e(ctx["ai_comment"]))
+        L.append("")
+        L.append("<i>⚠️ Bu bir yatırım tavsiyesi değildir. Yorum, yukarıdaki göstergelerden yapay zekâ ile "
+                 "üretilmiştir ve hata içerebilir. Geçmiş testlerde 1 haftalık yön isabeti ~%50 çıktı (ayrıntı: /backtest).</i>")
+        return "\n".join(L)
     L.append("<b>💬 Yorum</b>")
     com = commentary(d, w, week_score, month_score)
     if ctx.get("mode") == "short":

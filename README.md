@@ -14,6 +14,7 @@ Tamamen ücretsiz servislerle çalışır: Render (sunucu), Supabase (veritaban�
 | | Özellik | Açıklama |
 |---|---|---|
 | 📈 | **Teknik analiz** | 6 gösterge (Bollinger Bands, Parabolic SAR, RSI, Stochastic RSI, MACD, ADX), günlük + haftalık grafik, Türkçe yorum |
+| 🤖 | **Yapay zekâ yorumu** | Gemini (ücretsiz katman) göstergeleri, seviyeleri ve son haberleri okuyup akıcı Türkçe yorum yazar; anahtar yoksa kural tabanlı yorum |
 | 🔮 | **Tahmin** | 1 hafta ve 1 ay için yön, hedef fiyat, ~%68 olasılıklı fiyat aralığı ve güven derecesi |
 | 🖼 | **Grafik görseli** | Mumlar, Bollinger bantları, SAR noktaları, destek/direnç çizgileri, RSI ve MACD panelleri |
 | ℹ️ | **Coin bilgi kartı** | Nedir / neden oluşturuldu (Türkçe çeviri), piyasa değeri, hacim, arz, zirve/dip, sıralama |
@@ -159,6 +160,7 @@ Süresi dolan tahmin saatlik olarak gerçek fiyatla karşılaştırılır:
 | `data.py` | Kripto (Binance/Bybit) ve BIST (Yahoo) mum verisi, SSL ayarları |
 | `coininfo.py` · `stockinfo.py` | Coin ve şirket bilgi kartları |
 | `market.py` | Piyasa havası, haberler, anlık fiyat |
+| `ai.py` | Gemini yapay zekâ yorumu (`python ai.py eth` ile terminalden test; 30 dk önbellek) |
 | `translate.py` | Ücretsiz İngilizce → Türkçe çeviri |
 | `store.py` | Veri katmanı: Supabase REST (yoksa yerel `store.json`) |
 | `supabase_schema.sql` | Veritabanı tabloları |
@@ -185,6 +187,8 @@ Telegram'da **@BotFather** → `/newbot` → bot adı ve kullanıcı adı → **
 | `SUPABASE_URL` | Supabase Project URL |
 | `SUPABASE_KEY` | Supabase **service_role** anahtarı (gizli tutun) |
 | `ALLOWED_CHAT_IDS` | *(önerilir)* Sadece sizin chat ID'niz; boşsa bot herkese açık |
+| `GEMINI_API_KEY` | *(isteğe bağlı)* aistudio.google.com → **Get API key** (ücretsiz, faturalandırmayı açmayın). Varsa analizlerde yapay zekâ yorumu çıkar |
+| `GEMINI_MODEL` | *(isteğe bağlı)* Varsayılan `gemini-flash-latest`, olmazsa `gemini-2.5-flash` |
 | `ALERT_CHAT_IDS` | *(eski ayar)* Varsa ilk açılışta veritabanına taşınır |
 
 GitHub'a her gönderimde Render botu otomatik günceller (Auto-Deploy).
@@ -207,6 +211,7 @@ Kurumsal ağlarda SSL denetimi için Windows sertifika deposu otomatik kullanıl
 
 ## ⚠️ Sınırlar
 - BIST verisi ~15 dakika gecikmelidir (anlık veri ücretli).
+- Yapay zekâ yorumu yalnızca botun hesapladığı sayıları yorumlar, isabeti artırmaz ve hata içerebilir. Gemini ücretsiz katmanında gönderilen veriler (göstergeler ve haber başlıkları; portföy gönderilmez) Google tarafından modelleri geliştirmek için kullanılabilir. Kota dolarsa ya da servise ulaşılamazsa kural tabanlı yorum gelir.
 - Yahoo'nun BIST için F/K ve PD/DD oranları güvenilir olmadığından gösterilmez.
 - Binance/Bybit'te USDT paritesi olmayan coinlerde yalnızca bilgi kartı gelir; 60 günden kısa geçmişi olanlarda teknik analiz yapılamaz.
 - Çeviri ve haberler resmi olmayan ücretsiz uç noktalara dayanır; erişilemezse açıklama İngilizce gelir veya haber bölümü atlanır.

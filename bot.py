@@ -17,6 +17,7 @@ from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Upd
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler,
                           TypeHandler, filters)
 
+import ai
 import alerts
 import backtest
 import events
@@ -177,6 +178,8 @@ def _analyze(item: str, name: str | None, news_query: str | None, mode: str = "n
         except Exception as ex:  # noqa: BLE001
             log.warning("Vadeli işlem verisi alınamadı: %s", ex)
     extra = [x for x in [market.sentiment_line(ctx["market"])] if x]
+    titles = [n["title"] for n in market.news(news_query)] if news_query else []
+    ctx["ai_comment"] = ai.comment(ctx, extra, titles)
     text = render_report(ctx, extra)
     if news_query:
         nb = market.news_block(news_query)
