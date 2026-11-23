@@ -103,12 +103,19 @@ Hisseler kodla ya da şirket adıyla bulunur (`aselsan` → `ASELS`).
 | Alarm | Koşul | Tekrar |
 |---|---|---|
 | 🚨 Ani düşüş / 🚀 ani yükseliş | 15 dk'da ±%2.5 veya 1 saatte ±%4 (BIST'te ayrıca gün içi ±%4) | 2 saatte bir |
-| 📊 Yüksek hacim | Son 15 dk hacmi, son 24 saatin 15 dk'lık medyanının 4 katı | 2 saatte bir |
+| 📊 Yüksek hacim | Son 15 dk hacmi **o saatin normalinin** 4 katı **ve** fiyat 15 dk'da en az ±%0.7 oynamış (aynı anda ani hareket alarmı varsa ayrıca gönderilmez) | 2 saatte bir |
 | 🔔 Teknik sinyal | Günlük SAR trend dönüşü, RSI 30'un altına / 70'in üstüne geçiş | Günde bir |
 | 🎯 Fiyat hedefi | `/hedef` ile kurulan seviye kırıldığında | Bir kez |
 
 İzlenen varlıklar: takip listesi + portföydekiler. BIST hisseleri yalnızca seans saatlerinde (hafta içi 10:00–18:10) kontrol edilir.
 Eşikler `alerts.py` dosyasının başındadır.
+
+**Hacim alarmının mantığı:** "Normal" hacim, o 15 dakikalık saat diliminin son ~10 gündeki medyanı ile son 24 saatin
+medyanından büyüğüdür. Böylece ABD borsasının açılışı (16:30) veya BIST açılış/kapanış seansı gibi her gün tekrarlanan
+hacim artışları alarm sayılmaz. BTC/ETH/SOL'un 28 günlük verisinde (Kasım 2026) eski kurala göre alarm sayısı yarıya indi
+(coin başına günde ~2.5 → ~1.2). Alarmdan sonraki 1 saatteki fiyat hareketi normalin 1.3–1.8 katından **~2.7 katına** çıktı.
+Hacim **yönü tahmin etmiyor** (yön isabeti ~%50, Binance alış/satış oranıyla da), bu yüzden mesaj "sert hareket gelebilir,
+yön belirsiz" der ve en yakın destek/direnci gösterir.
 
 ### Geriye dönük test bulguları (Kasım 2026)
 `python backtest.py` ile 10 coin ve 11 BIST varlığında (2-5 yıl) ölçüldü:

@@ -529,8 +529,8 @@ async def alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with Waiting(update, "⏳ Takip listesi kontrol ediliyor..."):
             items = await run(F.alert_items, chat)
             lines = await run(lambda: alerts.check_all(True, items))
-        await reply(update, "📋 Anlık durum (alarm eşikleri: 15dk ±%{}, 1s ±%{}, hacim {}x)\n\n{}".format(
-            alerts.DROP_15M, alerts.DROP_1H, alerts.VOLUME_X, "\n".join(lines)), html_mode=False)
+        await reply(update, "📋 Anlık durum (alarm eşikleri: 15dk ±%{}, 1s ±%{}, hacim {}x + fiyat ±%{})\n\n{}".format(
+            alerts.DROP_15M, alerts.DROP_1H, alerts.VOLUME_X, alerts.VOLUME_MIN_MOVE, "\n".join(lines)), html_mode=False)
     else:
         s = await run(F.get_settings, chat)
         items = await run(F.alert_items, chat)
@@ -540,7 +540,7 @@ async def alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Kontrol sıklığı: {CHECK_EVERY // 60} dakikada bir\n\n"
             "Alarm türleri:\n"
             f"• Ani düşüş/yükseliş: 15 dk'da ±%{alerts.DROP_15M} veya 1 saatte ±%{alerts.DROP_1H}\n"
-            f"• Yüksek hacim: son 15 dk hacmi normalin {alerts.VOLUME_X} katı\n"
+            f"• Yüksek hacim: son 15 dk hacmi o saatin normalinin {alerts.VOLUME_X} katı ve fiyat ±%{alerts.VOLUME_MIN_MOVE} oynamış\n"
             "• Teknik sinyal: günlük SAR trend dönüşü, RSI 30/70 geçişi\n"
             "• Fiyat hedefleri: /hedef\n\n"
             "/alarm ac · /alarm kapat · /alarm durum (anlık ölçümler)" + db_warning())
