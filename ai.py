@@ -17,8 +17,9 @@ import indicators as ta
 
 log = logging.getLogger("ai")
 URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-# Önce GEMINI_MODEL (ayarlıysa), sonra Google'ın "en güncel Flash" takma adı, sonra sabit sürüm
-MODELS = [m for m in (os.getenv("GEMINI_MODEL"), "gemini-flash-latest", "gemini-2.5-flash") if m]
+# Önce GEMINI_MODEL, sonra güncel Flash takma adı, sabit sürüm (Google'ın önerdiği), en son hafif model
+MODELS = list(dict.fromkeys(m for m in (os.getenv("GEMINI_MODEL", "").strip(), "gemini-flash-latest",
+                                        "gemini-3.8-flash", "gemini-flash-lite-latest") if m))
 CACHE_TTL = 1800          # aynı varlık+mod için 30 dk aynı yorumu kullan (kotayı korur)
 MAX_CHARS = 900           # Telegram 4096 sınırı için yorum uzunluğu üst sınırı
 _cache: dict[str, tuple[float, str]] = {}
@@ -88,11 +89,15 @@ def _context_text(ctx: dict, extra_lines: list[str], news_titles: list[str]) -> 
 
 
 def _call(model: str, prompt: str) -> str:
-    r = requests.post(URL.format(model=model),
-                      headers={"x-goog-api-key": _key()},
-                      json={"contents": [{"parts": [{"text": prompt}]}],
-                            "generationConfig": {"temperature": 0.4, "maxOutputTokens": 2048}},
-                      timeout=25)
+    for attempt in range(2):  # 500/503 (geçici yoğunluk) olursa kısa bekleyip bir kez daha dene
+        r = requests.post(URL.format(model=model),
+                          headers={"x-goog-api-key": _key()},
+                          json={"contents": [{"parts": [{"text": prompt}]}],
+                                "generationConfig": {"temperature": 0.4, "maxOutputTokens": 2048}},
+                          timeout=25)
+        if r.status_code not in (500, 503) or attempt:
+            break
+        time.sleep(2)
     if r.status_code == 404:
         _bad_models.add(model)  # model adı kalkmış/değişmiş: bir sonrakini dene
     if r.status_code >= 400:  # Google'ın açıklamasını loga taşı (anahtar yanıtta yer almaz)
@@ -154,9 +159,6 @@ def diagnose() -> str:
     L = [f"🔑 Anahtar var ({key[:4]}…{key[-4:]}, {len(key)} karakter)"]
     if raw != key:
         L.append("ℹ️ Anahtarın başında/sonunda boşluk veya tırnak vardı; bot bunları otomatik temizliyor.")
-    if not key.startswith("AIza"):
-        L.append("⚠️ Anahtar 'AIza' ile başlamıyor (büyük I, küçük z-a). Yanlış değer kopyalanmış olabilir; "
-                 "aşağıdaki model satırları ✅ ise sorun yok.")
     for model in MODELS:
         try:
             out = _call(model, "Sadece 'tamam' yaz.")

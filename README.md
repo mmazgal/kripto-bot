@@ -189,7 +189,7 @@ Telegram'da **@BotFather** → `/newbot` → bot adı ve kullanıcı adı → **
 | `SUPABASE_KEY` | Supabase **service_role** anahtarı (gizli tutun) |
 | `ALLOWED_CHAT_IDS` | *(önerilir)* Sadece sizin chat ID'niz; boşsa bot herkese açık |
 | `GEMINI_API_KEY` | *(isteğe bağlı)* aistudio.google.com → **Get API key** (ücretsiz, faturalandırmayı açmayın). Varsa analizlerde yapay zekâ yorumu çıkar |
-| `GEMINI_MODEL` | *(isteğe bağlı)* Varsayılan `gemini-flash-latest`, olmazsa `gemini-2.5-flash` |
+| `GEMINI_MODEL` | *(isteğe bağlı)* Varsayılan sıra: `gemini-flash-latest` → `gemini-3.8-flash` → `gemini-flash-lite-latest` (biri yoğun/kapalıysa sıradaki denenir) |
 | `ALERT_CHAT_IDS` | *(eski ayar)* Varsa ilk açılışta veritabanına taşınır |
 
 GitHub'a her gönderimde Render botu otomatik günceller (Auto-Deploy).
