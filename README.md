@@ -27,7 +27,7 @@ Tamamen ücretsiz servislerle çalışır: Render (sunucu), Supabase (veritaban�
 | ☀️ | **Sabah özeti** | Her gün 09:00'da piyasa havası + takip listesinin durumu |
 | 💼 | **Portföy** | Kâr/zarar takibi; kripto ($) + BIST (₺) ve TL cinsinden genel toplam |
 | 📒 | **Tahmin karnesi** | Bot her tahminini kaydeder, süresi dolunca doğruluğunu ölçer |
-| 🧠 | **Kendini ayarlayan alarmlar** | Her alarm ve eşiğe yaklaşan olay kaydedilir, sonucu ölçülür, alarmlara 👍/👎 verilir; her sabah alarm karnesi, her pazartesi eşikler otomatik ayarlanır |
+| 🧠 | **Kendini ayarlayan alarmlar** | Her alarm ve eşiğe yaklaşan olay kaydedilir, sonucu ölçülür, alarmlara 👍/👎 verilir, 👎'de sebep seçilir (geç kaldı / ters gitti / küçük kaldı / ilgilendirmiyor); her sabah alarm karnesi, her pazartesi eşikler otomatik ayarlanır |
 | 🧪 | **Geriye dönük test** | Puanlama sistemi geçmiş 2-5 yılda ne kadar isabetliydi; strateji vs al-ve-tut |
 | 🔎 | **Günün fırsatları** | Her sabah 09:05'te ilk 100 coin + BIST 100 taranır, öne çıkan sinyaller listelenir |
 | ↔️ | **Uyumsuzluk (divergence)** | Fiyat ile RSI/MACD arasındaki pozitif/negatif uyumsuzluklar |
@@ -63,7 +63,8 @@ Tamamen ücretsiz servislerle çalışır: Render (sunucu), Supabase (veritaban�
 | `/takip` | Takip listesini gösterir (varsayılan: BTC, SOL) |
 | `/takip ekle eth` · `/takip ekle thyao hisse` · `/takip sil sol` | Listeyi düzenler; alarm ve sabah özeti bu listeyi kullanır |
 | `/alarm` · `/alarm ac` · `/alarm kapat` | Alarm durumu, açma/kapama |
-| `/alarm durum` | İzlenen varlıkların anlık ölçümleri (15 dk / 1 saat / gün değişimi, hacim katı) |
+| `/alarm durum` | İzlenen varlıkların anlık ölçümleri (15 dk / 1 saat / 2 saat / gün değişimi, normalin kaç katı, hacim katı) |
+| `/alarm sessiz` · `/alarm sessiz temizle` | 👎 → "İlgilendirmiyor" ile sessize alınan alarmlar · hepsini geri aç |
 | `/hedef btc 60000` · `/hedef thyao hisse 350` | Fiyat hedefi kurar (yön otomatik belirlenir) |
 | `/hedef` · `/hedef sil 3` | Hedefleri listeler / siler |
 
@@ -143,6 +144,18 @@ Adım adım doğruya yaklaşma döngüsü: **kaydet → sonucu ölç → puanla 
    *sert* (4 saatte tipik hareketin 3 katı uç, yön fark etmez) · *devam* (4 saatte aynı yönde) ·
    *trend* (24 saatte aynı yönde güçlü) · *dönüş* (4 saatte ters yöne: dip/tepe).
    Alarmların altındaki **👍/👎** oylarıyla en çok örtüşen tanım hedef seçilir (en az 8 oy; o zamana kadar *sert*).
+   **👎'den sonra sebep sorulur** ve her sebep doğrudan bir eylemdir (son 14 günde aynı alarm türü için en az 3 kez):
+
+   | Sebep | Ne olur |
+   |---|---|
+   | ⏰ Geç kaldı | O alarm türünün eşikleri pazartesi ayarında **yalnız düşebilir** (daha erken uyarı); skor kazancı küçük olsa da uygulanır |
+   | 🤏 Hareket küçük kaldı | Eşikler **yalnız yükselebilir** (daha büyük hareketlerde uyarı) |
+   | ↩️ Ters yöne gitti | En sık sebep buysa ve ölçümde de o tür alarmların çoğu 4 saatte ters döndüyse, alarm mesajına "fiyat çoğunlukla ters döndü, dip/tepe olarak da düşün" notu eklenir |
+   | 🙅 İlgilendirmiyor | O varlığın o tür alarmları (ani hareket / trend / hacim / teknik / vadeli) sana **30 gün gelmez** — hemen. `/alarm sessiz` liste, `/alarm sessiz temizle` geri açar |
+
+   Sebepler ek bir tablo gerektirmez: oy değerinde saklanır (1 👍, -1 👎, -2 geç kaldı, -3 ters gitti, -4 küçük kaldı,
+   -5 ilgilendirmiyor); sessize almalar `notified` tablosunda `mute:` anahtarıyla tutulur. Sebepler Gemini'nin haftalık
+   yorumuna da verilir.
 4. **Günlük karne (09:10):** Dünün alarmları, her tanıma göre isabet (gönderilen vs adaylar), oylar ve
    dünün büyük hareketlerinden hangilerinde zamanında alarm olduğu.
 5. **Geçmişi yeniden oynatma:** Bir hafta veri beklemek yerine, takip edilen varlıkların son 14 günü 5 dakikalık

@@ -60,14 +60,20 @@ def params() -> dict:
 
 
 class AlertMsg(str):
-    """Alarm metni + kayıt numarası (👍/👎 butonları için)."""
+    """Alarm metni + kayıt numarası (👍/👎 butonları için) + tür (sessize alma için)."""
     event_id: int | None = None
+    kind: str = ""
+    item: str = ""
 
 
 def _alert(text: str, item: str, kind: str, m: dict, day_ch: float) -> AlertMsg:
     import learn
+    if learn.group_of(kind) in learn.reversal_groups():  # 👎 "ters yöne gitti" geri bildirimi + ölçüm
+        text = text.replace("\n👉", "\n↩️ <i>Dikkat: bu tür alarmlardan sonra fiyat çoğunlukla ters döndü "
+                                    "(senin geri bildirimin ve ölçüm). Dip/tepe olarak da düşün.</i>\n👉", 1)
     msg = AlertMsg(text)
     msg.event_id = learn.log_event(item, kind, True, m, day_ch)
+    msg.kind, msg.item = kind, item
     return msg
 
 

@@ -380,10 +380,125 @@ def cleanup():
         log.warning("Eski alarm kayıtları silinemedi: %s", ex)
 
 
-# ---------------- 3. Oylar ve hedef tanımı ----------------
+# ---------------- 3. Oylar, sebepler ve hedef tanımı ----------------
+# Oy değeri: 1 = 👍; -1 = 👎 (sebep yok); -2..-5 = 👎 + sebep. Veritabanında ek sütun gerekmesin diye
+# sebep oy değerinin içinde tutulur (vote > 0 → işe yaradı).
+REASONS = {-2: ("late", "⏰ Geç kaldı"), -3: ("rev", "↩️ Ters yöne gitti"),
+           -4: ("small", "🤏 Hareket küçük kaldı"), -5: ("mute", "🙅 İlgilendirmiyor")}
+VOTES = (1, -1) + tuple(REASONS)
+GROUP_PARAMS = {"fast": ("K15", "K1H"), "volume": ("VOLUME_X", "VOLUME_K"), "trend": ("TREND_K",)}
+GROUP_TR = {"fast": "ani hareket", "volume": "yüksek hacim", "trend": "trend başlangıcı",
+            "teknik": "teknik sinyal", "funding": "vadeli işlem"}
+MIN_REASON = 3            # bir sebebin eşiği değiştirmesi için en az bu kadar oy (son 14 gün)
+MUTE_DAYS = 30
+
+
+def group_of(kind: str) -> str:
+    if kind in ("drop", "pump", "day_drop", "day_pump"):
+        return "fast"
+    if kind in ("trend_up", "trend_down"):
+        return "trend"
+    if kind in ("volume", "funding"):
+        return kind
+    return "teknik"
+
+
 def record_vote(event_id: int, chat_id: int, vote: int):
     store.insert("alert_feedback", {"event_id": event_id, "chat_id": chat_id, "vote": vote,
                                     "at": _iso(_now())}, upsert=True)
+
+
+def get_event(event_id: int) -> dict | None:
+    rows = store.select("alert_events", {"id": event_id})
+    return rows[0] if rows else None
+
+
+def reason_summary(days: int = TUNE_DAYS) -> dict[str, dict[str, int]]:
+    """{alarm grubu: {sebep: oy sayısı}} — son `days` gündeki 👎 sebepleri."""
+    since = _now() - timedelta(days=days)
+    votes = [v for v in _votes() if int(v["vote"]) in REASONS and _parse(v["at"]) >= since]
+    if not votes:
+        return {}
+    by_id = {int(r["id"]): r for r in _events(since - timedelta(days=1))}
+    out: dict[str, dict[str, int]] = {}
+    for v in votes:
+        ev = by_id.get(int(v["event_id"]))
+        if ev:
+            g = out.setdefault(group_of(ev["kind"]), {})
+            code = REASONS[int(v["vote"])][0]
+            g[code] = g.get(code, 0) + 1
+    return out
+
+
+def nudges(summary: dict) -> dict[str, str]:
+    """Geri bildirimden eşik yönü: 'Geç kaldı' çoksa düşür ('late'), 'küçük kaldı' çoksa yükselt ('small')."""
+    out = {}
+    for g, c in summary.items():
+        late, small = c.get("late", 0), c.get("small", 0)
+        if g in GROUP_PARAMS and max(late, small) >= MIN_REASON and late != small:
+            out[g] = "late" if late > small else "small"
+    return out
+
+
+_rev_cache: tuple[float, set] = (0.0, set())
+
+
+def reversal_groups() -> set[str]:
+    """'Ters yöne gitti' en sık sebep olan ve ölçümde de çoğunlukla ters dönen alarm grupları (1 saat önbellek)."""
+    global _rev_cache
+    if time.time() - _rev_cache[0] < 3600:
+        return _rev_cache[1]
+    out = set()
+    try:
+        for g, c in reason_summary(30).items():
+            if c.get("rev", 0) >= MIN_REASON and c.get("rev", 0) == max(c.values()):
+                sent = [r for r in _events(_now() - timedelta(days=30))
+                        if r.get("sent") and group_of(r["kind"]) == g]
+                labs = [x for x in (label(r, "donus") for r in sent) if x is not None]
+                if labs and sum(labs) / len(labs) >= 0.5:
+                    out.add(g)
+    except Exception as ex:  # noqa: BLE001
+        log.warning("Ters dönüş notu hesaplanamadı: %s", ex)
+    _rev_cache = (time.time(), out)
+    return out
+
+
+# Sessize alma: notified tablosunda "mute:<sohbet>:<varlık>:<grup>" anahtarı (yeni tablo gerekmesin)
+def mute(chat_id: int, item: str, group: str):
+    store.insert("notified", {"key": f"mute:{chat_id}:{item}:{group}", "at": _iso(_now())}, upsert=True)
+
+
+def mutes() -> set[tuple[int, str, str]]:
+    """Geçerli sessize almalar: {(sohbet, varlık, grup)}."""
+    out = set()
+    try:
+        limit = _now() - timedelta(days=MUTE_DAYS)
+        for r in store.select("notified", {"at": ("gte", _iso(limit))}):
+            if str(r["key"]).startswith("mute:"):  # varlık "BIST:THYAO" gibi ':' içerebilir
+                chat, rest = r["key"][5:].split(":", 1)
+                item, group = rest.rsplit(":", 1)
+                out.add((int(chat), item, group))
+    except Exception as ex:  # noqa: BLE001
+        log.warning("Sessize almalar okunamadı: %s", ex)
+    return out
+
+
+def clear_mutes(chat_id: int) -> int:
+    n = 0
+    for c, item, group in mutes():
+        if c == chat_id:
+            store.delete("notified", {"key": f"mute:{c}:{item}:{group}"})
+            n += 1
+    return n
+
+
+def mutes_text(chat_id: int) -> str:
+    mine = sorted((i, g) for c, i, g in mutes() if c == chat_id)
+    if not mine:
+        return "🔔 Sessize alınmış alarm yok."
+    return ("🙅 Sessize alınanlar (30 gün):\n" +
+            "\n".join(f"• {i.replace('BIST:', '')} — {GROUP_TR.get(g, g)}" for i, g in mine) +
+            "\n\nHepsini geri açmak: /alarm sessiz temizle")
 
 
 def _events(since: datetime) -> list[dict]:
@@ -511,16 +626,25 @@ def tune(apply: bool = True, force: bool = False) -> dict:
     if data_days < MIN_DATA_DAYS and not force:
         rep["status"] = "waiting"
         return rep
-    best, best_p = base, cur
-    for steps in itertools.product(STEPS, repeat=len(TUNABLE)):
+    # Senin 👎 sebeplerin: "geç kaldı" çoksa o grubun eşikleri yalnız düşebilir, "küçük kaldı" çoksa yalnız
+    # yükselebilir. Bu durumda değişiklik, skor kazancı küçük olsa da uygulanır (geri bildirim önceliklidir).
+    rep["reasons"] = reason_summary()
+    rep["nudges"] = nudges(rep["reasons"])
+    forced = {k: rep["nudges"][g] for g, ks in GROUP_PARAMS.items() if g in rep["nudges"] for k in ks}
+    steps_of = {k: ((0.8, 0.9) if forced.get(k) == "late" else (1.1, 1.25) if forced.get(k) == "small" else STEPS)
+                for k in TUNABLE}
+    best, best_p = (None, cur) if forced else (base, cur)
+    for steps in itertools.product(*(steps_of[k] for k in TUNABLE)):
         p = {k: round(min(max(cur[k] * s, LIMITS[k][0]), LIMITS[k][1]), 2) for k, s in zip(TUNABLE, steps)}
         res = sim.run(p)
         if res["fired"] < MIN_FIRED or res["per_item_day"] > MAX_PER_ITEM_DAY:
             continue
-        if res["f"] > best["f"] + 1e-9 or (math.isclose(res["f"], best["f"]) and res["fired"] < best["fired"]):
+        if best is None or res["f"] > best["f"] + 1e-9 or (
+                math.isclose(res["f"], best["f"]) and res["fired"] < best["fired"]):
             best, best_p = res, p
+    best = best or base
     rep.update({"best": best, "new": best_p})
-    changed = best_p != cur and best["f"] >= base["f"] + MIN_GAIN
+    changed = best_p != cur and (bool(forced) or best["f"] >= base["f"] + MIN_GAIN)
     if changed and apply:
         save_config(best_p, cfg["version"] + 1)
         rep["applied"] = True
@@ -601,7 +725,13 @@ def daily_text(items: list[str]) -> str | None:
     v = [x for x in _votes() if int(x["event_id"]) in ids]
     if v:
         up = sum(1 for x in v if int(x["vote"]) > 0)
-        L.append(f"Senin oyların: 👍 {up} · 👎 {len(v) - up}")
+        why = {}
+        for x in v:
+            if int(x["vote"]) in REASONS:
+                k = REASONS[int(x["vote"])][1]
+                why[k] = why.get(k, 0) + 1
+        L.append(f"Senin oyların: 👍 {up} · 👎 {len(v) - up}" +
+                 (" (" + ", ".join(f"{k} {n}" for k, n in why.items()) + ")" if why else ""))
     mm = missed_moves(items, start.astimezone(timezone.utc), sent)
     if mm:
         L.append("")
@@ -612,6 +742,15 @@ def daily_text(items: list[str]) -> str | None:
     L.append(f"<i>Ayar sürümü v{cfg['version']} · sonuçlar 4 saat sonra ölçülür; haftalık ayar pazartesi 09:20. "
              "Alarmların altındaki 👍/👎 ile 'işe yaradı'yı sen tanımlarsın. Ayrıntı: /alarmkarne</i>")
     return "\n".join(L)
+
+
+def reasons_lines(summary: dict) -> list[str]:
+    icons = {code: text.split()[0] for code, text in REASONS.values()}
+    return [f"• {GROUP_TR.get(g, g)}: " + " · ".join(f"{icons[k]} {REASONS_TR[k]} {n}" for k, n in c.items())
+            for g, c in summary.items()]
+
+
+REASONS_TR = {code: text.split(" ", 1)[1] for code, text in REASONS.values()}
 
 
 def weekly_text(rep: dict, ai_text: str | None = None) -> str:
@@ -634,6 +773,14 @@ def weekly_text(rep: dict, ai_text: str | None = None) -> str:
                 L.append(f"• {NAMES[k]}: {rep['cur'][k]:g} → <b>{rep['new'][k]:g}</b>")
     elif rep["status"] == "ok":
         L.append("➖ Daha iyi bir ayar bulunamadı (fark anlamlı değil); mevcut eşikler korunuyor.")
+    if rep.get("reasons"):
+        L.append("")
+        L.append("<b>👎 Geri bildirimlerin (14 gün)</b>")
+        L.extend(reasons_lines(rep["reasons"]))
+        for g, how in rep.get("nudges", {}).items():
+            L.append(f"→ {GROUP_TR[g]}: " + ("eşikler <b>düşürüldü</b> (daha erken uyarı)" if how == "late"
+                                             else "eşikler <b>yükseltildi</b> (daha büyük hareketlerde uyarı)")
+                     + ("" if rep.get("applied") else " — uygun ayar bulunamadı, sonraki hafta tekrar denenecek"))
     if ai_text:
         L.append("")
         L.append("<b>🤖 Yapay zekâ değerlendirmesi</b>")
@@ -671,6 +818,8 @@ def ai_prompt(rep: dict) -> str | None:
         f"Saate göre (TSİ): {breakdown(lambda r: int(r.get('hour') or 0))}",
         f"Hacim katı 4-6 / 6+ : {breakdown(lambda r: '6+' if (r['vol_x'] or 0) >= 6 else '<6')}",
         f"Tanımların oylarla örtüşmesi: {rep['agreement']}",
+        f"Kullanıcının 👎 sebepleri (grup: sebep sayısı; late=geç kaldı, rev=ters yöne gitti, "
+        f"small=hareket küçük kaldı, mute=ilgilendirmiyor): {rep.get('reasons') or 'yok'}",
     ]
     return ("Bir kripto/BIST Telegram alarm botunun son 2 haftalık alarm performansı aşağıda. "
             "Türkçe, en fazla 6 cümleyle: hangi alarmlar işe yaramadı, olası nedeni ne (saat, varlık, tür), "
@@ -701,6 +850,10 @@ def status_text() -> str:
             L.append(f"• {desc}: {_pct(sum(s), len(s))} ({sum(s)}/{len(s)})")
     votes = _votes()
     L.append(f"Toplam oy: {len(votes)} (hedef tanımı seçmek için {MIN_VOTES} gerekli)")
+    rs = reason_summary()
+    if rs:
+        L.append(f"👎 sebepleri (14 gün; bir sebep {MIN_REASON} kez seçilince eşiği o yöne iter):")
+        L.extend(reasons_lines(rs))
     L.append(f"Geçmişten yeniden oynatılmış olay: {replay}" + ("" if replay else " — /alarmkarne gecmis ile başlat"))
     try:
         runs = store.select("tune_runs", order="id.desc")[:1]

@@ -414,12 +414,25 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     parts = (q.data or "").split("|")
     kind, item = parts[0], parts[1] if len(parts) > 1 else ""
-    if kind == "v":  # alarm oyu: v|<kayıt no>|<1/-1>
+    if kind == "v":  # alarm oyu: v|<kayıt no>|<oy> (vote_keyboard)
+        chat = update.effective_chat.id
+        note = "Oyun kaydedildi, teşekkürler 🙏"
         try:
             eid, vote = int(item), int(parts[2])
-            if vote not in (1, -1):
+            if vote not in learn.VOTES:
                 raise ValueError
-            await run(learn.record_vote, eid, update.effective_chat.id, vote)
+            await run(learn.record_vote, eid, chat, vote)
+            if vote == -1:
+                note = "Neden işe yaramadı? Bir sebep seçersen eşiği ona göre ayarlarım."
+            elif vote == -5:  # ilgilendirmiyor → bu varlığın bu tür alarmını sessize al
+                ev = await run(learn.get_event, eid)
+                if ev:
+                    g = learn.group_of(ev["kind"])
+                    await run(learn.mute, chat, ev["item"], g)
+                    note = (f"🙅 {F.label(ev['item'])} için {learn.GROUP_TR.get(g, g)} alarmları "
+                            f"{learn.MUTE_DAYS} gün gelmeyecek. Geri açmak: /alarm sessiz")
+            elif vote in learn.REASONS:
+                note = f"Kaydedildi: {learn.REASONS[vote][1]}. {learn.MIN_REASON} kez seçilince pazartesi eşiğe yansır."
         except (IndexError, ValueError):
             await q.answer("Geçersiz istek")
             return
@@ -427,7 +440,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log.warning("Oy kaydedilemedi: %s", ex)
             await q.answer("Oy kaydedilemedi (veritabanı)")
             return
-        await q.answer("Oyun kaydedildi, teşekkürler 🙏")
+        await q.answer(note, show_alert=vote == -5)
         try:
             await q.edit_message_reply_markup(vote_keyboard(eid, vote))
         except Exception:  # noqa: BLE001
@@ -539,6 +552,13 @@ async def alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     chat = update.effective_chat.id
     arg = (context.args[0].lower() if context.args else "")
+    if arg in ("sessiz", "sustur"):
+        if len(context.args) > 1 and context.args[1].lower() in ("temizle", "ac", "aç", "sil"):
+            n = await run(learn.clear_mutes, chat)
+            await reply(update, f"🔔 {n} sessize alma kaldırıldı; alarmlar yeniden gelecek.", html_mode=False)
+        else:
+            await reply(update, await run(learn.mutes_text, chat), html_mode=False)
+        return
     if arg in ("ac", "aç", "on", "kapat", "off"):
         on = arg in ("ac", "aç", "on")
         await run(lambda: F.set_setting(chat, alerts_on=on))
@@ -573,7 +593,9 @@ async def alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{alerts.VOLUME_K:g} katı oynamış\n"
             "• Teknik sinyal: günlük SAR trend dönüşü, RSI 30/70 geçişi\n"
             "• Fiyat hedefleri: /hedef\n\n"
-            "/alarm ac · /alarm kapat · /alarm durum (anlık ölçümler)" + db_warning())
+            "Alarmların altındaki 👍/👎 ile geri bildirim ver; 👎'de sebep seçersen (geç kaldı, ters gitti, "
+            "küçük kaldı, ilgilendirmiyor) eşikler ona göre ayarlanır.\n\n"
+            "/alarm ac · /alarm kapat · /alarm durum (anlık ölçümler) · /alarm sessiz (sessize alınanlar)" + db_warning())
 
 
 async def hedef(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -688,14 +710,20 @@ async def text_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------- Zamanlanmış işler ----------------
 def vote_keyboard(event_id: int, chosen: int | None = None) -> InlineKeyboardMarkup:
-    """Alarm altındaki oy butonları; callback: v|<kayıt no>|<1/-1>."""
-    up, down = "👍 İşe yaradı", "👎 Yaramadı"
-    if chosen == 1:
-        up = "✅ " + up
-    elif chosen == -1:
-        down = "✅ " + down
-    return InlineKeyboardMarkup([[InlineKeyboardButton(up, callback_data=f"v|{event_id}|1"),
-                                  InlineKeyboardButton(down, callback_data=f"v|{event_id}|-1")]])
+    """Alarm altındaki oy butonları; callback: v|<kayıt no>|<oy>.
+    Oy: 1 👍, -1 👎 (sonra sebep sorulur), -2..-5 👎 + sebep (learn.REASONS)."""
+    b = lambda text, vote: InlineKeyboardButton(text, callback_data=f"v|{event_id}|{vote}")  # noqa: E731
+    if chosen == -1:  # 👎 verildi: neden?
+        r = learn.REASONS
+        return InlineKeyboardMarkup([
+            [b(r[-2][1], -2), b(r[-3][1], -3)],
+            [b(r[-4][1], -4), b(r[-5][1], -5)],
+            [b("👍 Aslında işe yaradı", 1)],
+        ])
+    if chosen in learn.REASONS:
+        return InlineKeyboardMarkup([[b(f"✅ 👎 {learn.REASONS[chosen][1]}", chosen), b("Değiştir", -1)]])
+    return InlineKeyboardMarkup([[b("✅ 👍 İşe yaradı" if chosen == 1 else "👍 İşe yaradı", 1),
+                                  b("👎 Yaramadı", -1)]])
 
 
 async def send_html(bot, chat: int, text: str, markup=None):
@@ -718,9 +746,12 @@ async def alert_job(context: ContextTypes.DEFAULT_TYPE):
         per_chat = {c: await run(F.alert_items, c) for c in chats}
         all_items = sorted({i for items in per_chat.values() for i in items})
         results = await run(alerts.check_items, all_items)
+        muted = await run(learn.mutes)  # 👎 "İlgilendirmiyor" ile sessize alınanlar
         for chat, items in per_chat.items():
             for item in items:
                 for m in results.get(item, []):
+                    if (chat, item, learn.group_of(getattr(m, "kind", ""))) in muted:
+                        continue
                     eid = getattr(m, "event_id", None)
                     await send_html(context.bot, chat, m, vote_keyboard(eid) if eid else None)
     try:  # fiyat hedefleri (alarm kapalı olsa da hedef kuran haberdar olsun)
