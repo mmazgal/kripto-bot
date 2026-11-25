@@ -80,6 +80,36 @@ def get_klines(symbol: str, interval: str = "1d", limit: int = 500) -> tuple[pd.
     raise RuntimeError("Veri alınamadı -> " + " | ".join(errors))
 
 
+def get_klines_since(symbol: str, interval: str, start_ms: int, limit: int = 300) -> pd.DataFrame:
+    """Belirli bir andan itibaren mumlar (alarm sonuçlarını ölçmek için). Önce Binance, olmazsa Bybit."""
+    errors = []
+    try:
+        r = requests.get("https://api.binance.com/api/v3/klines",
+                         params={"symbol": symbol, "interval": interval, "startTime": start_ms, "limit": limit},
+                         timeout=TIMEOUT, headers=HEADERS)
+        r.raise_for_status()
+        df = pd.DataFrame(r.json()).iloc[:, :6]
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"Binance: {e}")
+        try:
+            iv = {"1h": "60", "15m": "15", "5m": "5"}[interval]
+            r = requests.get("https://api.bybit.com/v5/market/kline",
+                             params={"category": "spot", "symbol": symbol, "interval": iv,
+                                     "start": start_ms, "limit": min(limit, 1000)},
+                             timeout=TIMEOUT, headers=HEADERS)
+            r.raise_for_status()
+            df = pd.DataFrame(r.json()["result"]["list"]).iloc[:, :6]
+        except Exception as e2:  # noqa: BLE001
+            errors.append(f"Bybit: {e2}")
+            raise RuntimeError("Veri alınamadı -> " + " | ".join(errors)) from e2
+    if df.empty:
+        return df
+    df.columns = ["time", "open", "high", "low", "close", "volume"]
+    df = df.astype(float)
+    df["time"] = pd.to_datetime(df["time"].astype("int64"), unit="ms", utc=True)
+    return df.set_index("time").sort_index()
+
+
 def get_stock_klines(ticker: str, interval: str = "1d", period: str = "2y") -> tuple[pd.DataFrame, str]:
     """Borsa İstanbul hissesi (ör. THYAO.IS) için Yahoo Finance mumları."""
     import yfinance as yf

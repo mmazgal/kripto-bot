@@ -120,6 +120,27 @@ def _clean(text: str) -> str:
     return text
 
 
+def ask(prompt: str, max_chars: int = 1500) -> str | None:
+    """Serbest istem (ör. haftalık alarm analizi); kapalıysa veya hata olursa None."""
+    global last_error
+    if not enabled():
+        return None
+    for model in MODELS:
+        if model in _bad_models:
+            continue
+        try:
+            text = re.sub(r"[*_#`]+", "", _call(model, prompt)).strip()
+            if text:
+                if len(text) > max_chars:
+                    cut = text[:max_chars]
+                    text = cut[: cut.rfind(".") + 1] or cut + "…"
+                return text
+        except Exception as ex:  # noqa: BLE001
+            last_error = f"{model}: " + str(ex).replace(_key() or "\0", "***")
+            log.warning("Gemini isteği başarısız: %s", last_error)
+    return None
+
+
 def comment(ctx: dict, extra_lines: list[str] | None = None, news_titles: list[str] | None = None) -> str | None:
     """Analiz bağlamı için yapay zekâ yorumu; kapalıysa veya hata olursa None."""
     if not enabled():

@@ -91,8 +91,9 @@ _OPS = {"eq": lambda a, b: a == b, "neq": lambda a, b: a != b, "lt": lambda a, b
         "lte": lambda a, b: a <= b, "gt": lambda a, b: a > b, "gte": lambda a, b: a >= b}
 _PKEYS = {"settings": ("chat_id",), "watchlist": ("chat_id", "item"),
           "predictions": ("item", "horizon_days", "created_date"), "notified": ("key",),
-          "paper_state": ("market",), "paper_positions": ("market", "item")}
-_NO_ID = {"settings", "watchlist", "notified", "paper_state", "paper_positions"}
+          "paper_state": ("market",), "paper_positions": ("market", "item"),
+          "alert_feedback": ("event_id", "chat_id"), "alert_config": ("key",)}
+_NO_ID = {"settings", "watchlist", "notified", "paper_state", "paper_positions", "alert_feedback", "alert_config"}
 
 
 def _load():

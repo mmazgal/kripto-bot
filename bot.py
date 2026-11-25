@@ -23,6 +23,7 @@ import backtest
 import events
 import features as F
 import futures
+import learn
 import market
 import paper
 import scanner
@@ -45,7 +46,9 @@ SHORT_WORDS = {"kisa", "kısa", "/kisa"}
 CHECK_EVERY = 300          # sn: alarm kontrol sıklığı
 SUMMARY_TIME = dtime(9, 0, tzinfo=F.TR)
 SCAN_TIME = dtime(9, 5, tzinfo=F.TR)
+ALERTCARD_TIME = dtime(9, 10, tzinfo=F.TR)   # dünün alarm karnesi
 PAPER_TIME = dtime(9, 15, tzinfo=F.TR)
+TUNE_TIME = dtime(9, 20, tzinfo=F.TR)        # pazartesi: haftalık eşik ayarı
 DAILY_DEADLINE = (12, 0)   # sunucu uyuyup/yeniden başlayıp saati kaçırırsa bu saate kadar telafi edilir
 NOT_EDITED = ~filters.UpdateType.EDITED  # mesaj düzenlenince komut tekrar çalışmasın
 ITEM_RE = re.compile(r"^(BIST:)?[A-Z0-9]{1,15}$")
@@ -66,7 +69,8 @@ HELP = (
     "<b>📋 Takip & Alarm</b>\n"
     "/takip — listen · /takip ekle eth · /takip ekle thyao hisse · /takip sil sol\n"
     "/alarm — durum · /alarm ac · /alarm kapat · /alarm durum\n"
-    "/hedef btc 60000 — fiyat hedefi · /hedef — liste · /hedef sil 3\n\n"
+    "/hedef btc 60000 — fiyat hedefi · /hedef — liste · /hedef sil 3\n"
+    "/alarmkarne — alarmlar işe yarıyor mu (bot her hafta eşikleri kendisi ayarlar; alarmlara 👍/👎 ver)\n\n"
     "<b>💼 Portföy & Raporlar</b>\n"
     "/portfoy — kâr/zarar · /portfoy ekle btc 0.05 62000 · /portfoy ekle thyao hisse 100 300\n"
     "/sanal — botun kendi sinyalleriyle yönettiği sanal portföy\n"
@@ -81,6 +85,7 @@ MENU = [
     ("kisa", "Kısa vade analizi (ör. /kisa btc)"), ("firsat", "Günün fırsatları taraması"),
     ("piyasa", "Piyasa havası"), ("takvim", "Ekonomik takvim"), ("karsilastir", "Karşılaştır (ör. btc eth sol)"),
     ("takip", "Takip listesi"), ("hedef", "Fiyat hedefleri"), ("alarm", "Alarm ayarları"),
+    ("alarmkarne", "Alarmlar işe yarıyor mu"),
     ("portfoy", "Portföyüm"), ("sanal", "Botun sanal portföyü"), ("backtest", "Geçmiş isabet testi"),
     ("karne", "Tahmin karnesi"), ("ozet", "Sabah özeti"), ("bilgi", "Coin bilgi kartı"), ("start", "Yardım"),
 ]
@@ -409,6 +414,25 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     parts = (q.data or "").split("|")
     kind, item = parts[0], parts[1] if len(parts) > 1 else ""
+    if kind == "v":  # alarm oyu: v|<kayıt no>|<1/-1>
+        try:
+            eid, vote = int(item), int(parts[2])
+            if vote not in (1, -1):
+                raise ValueError
+            await run(learn.record_vote, eid, update.effective_chat.id, vote)
+        except (IndexError, ValueError):
+            await q.answer("Geçersiz istek")
+            return
+        except Exception as ex:  # noqa: BLE001
+            log.warning("Oy kaydedilemedi: %s", ex)
+            await q.answer("Oy kaydedilemedi (veritabanı)")
+            return
+        await q.answer("Oyun kaydedildi, teşekkürler 🙏")
+        try:
+            await q.edit_message_reply_markup(vote_keyboard(eid, vote))
+        except Exception:  # noqa: BLE001
+            pass
+        return
     if not ITEM_RE.match(item):  # callback verisi istemciden gelir; doğrula
         await q.answer("Geçersiz istek")
         return
@@ -657,10 +681,23 @@ async def text_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------- Zamanlanmış işler ----------------
-async def send_html(bot, chat: int, text: str):
+def vote_keyboard(event_id: int, chosen: int | None = None) -> InlineKeyboardMarkup:
+    """Alarm altındaki oy butonları; callback: v|<kayıt no>|<1/-1>."""
+    up, down = "👍 İşe yaradı", "👎 Yaramadı"
+    if chosen == 1:
+        up = "✅ " + up
+    elif chosen == -1:
+        down = "✅ " + down
+    return InlineKeyboardMarkup([[InlineKeyboardButton(up, callback_data=f"v|{event_id}|1"),
+                                  InlineKeyboardButton(down, callback_data=f"v|{event_id}|-1")]])
+
+
+async def send_html(bot, chat: int, text: str, markup=None):
     try:
-        for part in chunks(text):
-            await bot.send_message(chat, part, parse_mode="HTML", disable_web_page_preview=True)
+        parts = chunks(text)
+        for i, part in enumerate(parts):
+            await bot.send_message(chat, part, parse_mode="HTML", disable_web_page_preview=True,
+                                   reply_markup=markup if i == len(parts) - 1 else None)
     except Exception as ex:  # noqa: BLE001
         log.warning("Mesaj gönderilemedi (%s): %s", chat, ex)
 
@@ -678,7 +715,8 @@ async def alert_job(context: ContextTypes.DEFAULT_TYPE):
         for chat, items in per_chat.items():
             for item in items:
                 for m in results.get(item, []):
-                    await send_html(context.bot, chat, m)
+                    eid = getattr(m, "event_id", None)
+                    await send_html(context.bot, chat, m, vote_keyboard(eid) if eid else None)
     try:  # fiyat hedefleri (alarm kapalı olsa da hedef kuran haberdar olsun)
         for chat, m in await run(F.check_targets):
             await send_html(context.bot, chat, m)
@@ -693,6 +731,61 @@ async def resolve_job(context: ContextTypes.DEFAULT_TYPE):
             log.info("%d tahmin sonuçlandırıldı", n)
     except Exception as ex:  # noqa: BLE001
         log.warning("Tahmin çözümleme hatası: %s", ex)
+    try:
+        n = await run(learn.resolve_events)
+        if n:
+            log.info("%d alarm sonucu ölçüldü", n)
+    except Exception as ex:  # noqa: BLE001
+        log.warning("Alarm sonucu ölçme hatası: %s", ex)
+
+
+async def alertcard_job(context: ContextTypes.DEFAULT_TYPE):
+    """Her sabah: dünün alarm karnesi (alarmı açık sohbetlere)."""
+    chats = await run(F.recipients, "alerts_on")
+    await run(learn.cleanup)
+    for chat in chats:
+        try:
+            items = await run(F.alert_items, chat)
+            text = await run(learn.daily_text, items)
+            if text:
+                await send_html(context.bot, chat, text)
+        except Exception as ex:  # noqa: BLE001
+            log.warning("Alarm karnesi gönderilemedi (%s): %s", chat, ex)
+
+
+def _tune_report(force: bool = False) -> str:
+    rep = learn.tune(apply=True, force=force)
+    prompt = learn.ai_prompt(rep) if rep["status"] != "nodata" else None
+    ai_text = ai.ask(prompt) if prompt else None
+    if rep["status"] != "nodata":
+        learn.save_run(rep, ai_text)
+    return learn.weekly_text(rep, ai_text)
+
+
+async def tune_job(context: ContextTypes.DEFAULT_TYPE):
+    """Pazartesi sabahı: eşik ayar turu (otomatik uygular) + rapor."""
+    if datetime.now(F.TR).weekday() != 0:
+        return
+    text = await run(_tune_report)
+    for chat in await run(F.recipients, "alerts_on"):
+        await send_html(context.bot, chat, text)
+
+
+async def alarmkarne(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    arg = (context.args or [""])[0].lower()
+    if arg in ("dun", "dün", "gunluk"):
+        async with Waiting(update, "⏳ Dünün alarmları hesaplanıyor..."):
+            items = await run(F.alert_items, update.effective_chat.id)
+            text = await run(learn.daily_text, items)
+        await reply(update, text or "Dün için alarm kaydı yok.")
+    elif arg in ("ayarla", "ayar", "tune"):
+        async with Waiting(update, "⏳ Eşik kombinasyonları deneniyor..."):
+            text = await run(_tune_report)
+        await reply(update, text)
+    else:
+        await reply(update, await run(learn.status_text))
 
 
 async def summary_job(context: ContextTypes.DEFAULT_TYPE):
@@ -812,7 +905,8 @@ async def daily_dispatch(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(F.TR)
     today = now.date().isoformat()
     for name, t, fn in (("summary", SUMMARY_TIME, summary_job), ("scan", SCAN_TIME, scan_job),
-                        ("paper", PAPER_TIME, paper_job)):
+                        ("alertcard", ALERTCARD_TIME, alertcard_job), ("paper", PAPER_TIME, paper_job),
+                        ("tune", TUNE_TIME, tune_job)):
         if _daily_done.get(name) == today:
             continue
         if not ((t.hour, t.minute) <= (now.hour, now.minute) < DAILY_DEADLINE):
@@ -872,7 +966,7 @@ def build_app() -> Application:
         "piyasa": piyasa, ("karsilastir", "kiyasla"): karsilastir, "takip": takip, "alarm": alarm,
         "hedef": hedef, ("portfoy", "portfolio"): portfoy, "ozet": ozet, "karne": karne,
         "kisa": kisa, ("firsat", "firsatlar", "tara"): firsat, "takvim": takvim, "backtest": backtest_cmd,
-        "sanal": sanal, ("yz", "ai"): yz,
+        "sanal": sanal, ("yz", "ai"): yz, ("alarmkarne", "ogrenme"): alarmkarne,
     }
     app.add_handler(TypeHandler(Update, register_chat), group=-1)
     for names, fn in handlers.items():

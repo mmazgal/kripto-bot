@@ -27,6 +27,7 @@ Tamamen ücretsiz servislerle çalışır: Render (sunucu), Supabase (veritaban�
 | ☀️ | **Sabah özeti** | Her gün 09:00'da piyasa havası + takip listesinin durumu |
 | 💼 | **Portföy** | Kâr/zarar takibi; kripto ($) + BIST (₺) ve TL cinsinden genel toplam |
 | 📒 | **Tahmin karnesi** | Bot her tahminini kaydeder, süresi dolunca doğruluğunu ölçer |
+| 🧠 | **Kendini ayarlayan alarmlar** | Her alarm ve eşiğe yaklaşan olay kaydedilir, sonucu ölçülür, alarmlara 👍/👎 verilir; her sabah alarm karnesi, her pazartesi eşikler otomatik ayarlanır |
 | 🧪 | **Geriye dönük test** | Puanlama sistemi geçmiş 2-5 yılda ne kadar isabetliydi; strateji vs al-ve-tut |
 | 🔎 | **Günün fırsatları** | Her sabah 09:05'te ilk 100 coin + BIST 100 taranır, öne çıkan sinyaller listelenir |
 | ↔️ | **Uyumsuzluk (divergence)** | Fiyat ile RSI/MACD arasındaki pozitif/negatif uyumsuzluklar |
@@ -75,6 +76,8 @@ Tamamen ücretsiz servislerle çalışır: Render (sunucu), Supabase (veritaban�
 | `/portfoy sil 2` | Pozisyon siler |
 | `/ozet` · `/ozet ac` · `/ozet kapat` | Sabah özetini şimdi al / her gün 09:00'da aç-kapat |
 | `/karne` | Geçmiş tahminlerin yön doğruluğu ve aralık isabeti |
+| `/alarmkarne` | Alarm öğrenme durumu: güncel eşikler, son 7 günün isabeti, oy sayısı |
+| `/alarmkarne dun` · `/alarmkarne ayarla` | Dünün alarm karnesi · eşik ayar turunu hemen çalıştır |
 | `/sanal` | Botun sanal portföyü (kripto $10k, BIST ₺100k ile başladı) |
 | `/yz` | Yapay zekâ (Gemini) bağlantı testi: anahtar var mı, hangi model çalışıyor, son hata |
 | `/start` | Tüm komutlar + chat ID |
@@ -116,6 +119,31 @@ hacim artışları alarm sayılmaz. BTC/ETH/SOL'un 28 günlük verisinde (Kasım
 (coin başına günde ~2.5 → ~1.2). Alarmdan sonraki 1 saatteki fiyat hareketi normalin 1.3–1.8 katından **~2.7 katına** çıktı.
 Hacim **yönü tahmin etmiyor** (yön isabeti ~%50, Binance alış/satış oranıyla da), bu yüzden mesaj "sert hareket gelebilir,
 yön belirsiz" der ve en yakın destek/direnci gösterir.
+
+### Kendini ayarlayan alarmlar (`learn.py`)
+Adım adım doğruya yaklaşma döngüsü: **kaydet → sonucu ölç → puanla → eşikleri ayarla → tekrar ölç.**
+
+1. **Kayıt:** Gönderilen her alarm ve eşiğin yarısına yaklaşan her "aday" olay (aynı varlık için 15 dk'da en fazla bir) `alert_events` tablosuna yazılır.
+   Adaylar sayesinde kaçırılan hareketler ve eşiği değiştirmenin etkisi de ölçülebilir.
+2. **Ölçüm (saatlik):** Olaydan 1, 4 ve 24 saat sonra fiyat ve 4/24 saat içindeki en yüksek/en düşük seviye.
+   Hareketler varlığın *tipik* hareketine göre değerlendirilir (BTC ile PEPE kıyaslanabilsin).
+3. **"İşe yaradı" tanımları** (hepsi birlikte ölçülür):
+   *sert* (4 saatte tipik hareketin 3 katı uç, yön fark etmez) · *devam* (4 saatte aynı yönde) ·
+   *trend* (24 saatte aynı yönde güçlü) · *dönüş* (4 saatte ters yöne: dip/tepe).
+   Alarmların altındaki **👍/👎** oylarıyla en çok örtüşen tanım hedef seçilir (en az 8 oy; o zamana kadar *sert*).
+4. **Günlük karne (09:10):** Dünün alarmları, her tanıma göre isabet (gönderilen vs adaylar), oylar ve
+   dünün büyük hareketlerinden hangilerinde zamanında alarm olduğu.
+5. **Haftalık ayar (pazartesi 09:20, otomatik uygulanır):** Son 14 günün olayları üzerinde 625 eşik kombinasyonu
+   simüle edilir, F0.5 skoru (isabet, yakalamadan 2 kat önemli) en iyi olan seçilir. Korumalar: her eşik turda en
+   fazla %25 değişir (bu sayede kötü çıkan değişiklik sonraki hafta geri alınabilir), en az 7 günlük veri ve
+   12 simüle alarm gerekir, varlık başına günde 2.5'ten fazla alarm üreten ayar seçilmez, kazanç anlamlı değilse
+   değişiklik yapılmaz. Gemini sonuçları Türkçe yorumlar. Ayarlanan eşikler: ani hareket 15 dk / 1 saat, hacim katı,
+   hacim alarmı için fiyat değişimi.
+
+Veri boyutu: günde birkaç yüz satır (~1-2 MB/ay); 90 günden eski kayıtlar silinir.
+İlk deneme (BTC+SOL, 13 günlük geçmişin yeniden oynatılması, Kasım 2026): ani hareket alarmlarından sonra fiyat
+4 saatte daha sık **ters döndü** (%56) ve daha seyrek aynı yönde devam etti (%26). Bu küçük bir örneklem; öğrenme
+döngüsü bunu her hafta yeniden ölçer.
 
 ### Geriye dönük test bulguları (Kasım 2026)
 `python backtest.py` ile 10 coin ve 11 BIST varlığında (2-5 yıl) ölçüldü:
@@ -164,6 +192,7 @@ Süresi dolan tahmin saatlik olarak gerçek fiyatla karşılaştırılır:
 | `events.py` | Ekonomik takvim ve KAP/şirket haberi alarmları (TCMB tarihleri `TR_EVENTS`) |
 | `futures.py` | Binance vadeli işlem verileri |
 | `paper.py` | Sanal portföy |
+| `learn.py` | Alarm öğrenme döngüsü: kayıt, sonuç ölçümü, karne, haftalık eşik ayarı |
 | `features.py` | Takip listesi, hedef, portföy, karne, karşılaştırma, sabah özeti |
 | `data.py` | Kripto (Binance/Bybit) ve BIST (Yahoo) mum verisi, SSL ayarları |
 | `coininfo.py` · `stockinfo.py` | Coin ve şirket bilgi kartları |
@@ -182,7 +211,7 @@ Süresi dolan tahmin saatlik olarak gerçek fiyatla karşılaştırılır:
 Telegram'da **@BotFather** → `/newbot` → bot adı ve kullanıcı adı → **token**'ı alın.
 
 ### 2. Supabase (veritabanı)
-1. **SQL Editor**'e önce `supabase_schema.sql`, sonra `supabase_migration_2.sql` içeriğini yapıştırıp **Run** deyin.
+1. **SQL Editor**'e sırayla `supabase_schema.sql`, `supabase_migration_2.sql` ve `supabase_migration_3.sql` içeriğini yapıştırıp **Run** deyin.
 2. **Project Settings → API** sayfasından *Project URL* ve **service_role** anahtarını alın.
 
 ### 3. Render (sunucu)

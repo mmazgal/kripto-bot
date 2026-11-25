@@ -33,8 +33,24 @@ BASELINE_TTL = 3600    # saat dilimi hacim profili önbelleği (sn)
 COOLDOWN_FAST = 2 * 3600   # fiyat/hacim alarmı tekrar süresi (sn)
 COOLDOWN_DAILY = 20 * 3600  # günlük teknik sinyal tekrar süresi (sn)
 
+# Yukarıdaki dört eşik learn.py tarafından haftalık ayarlanır; veritabanındaki ayar bunların üzerine yazılır.
+DEFAULTS = {"DROP_15M": DROP_15M, "DROP_1H": DROP_1H, "VOLUME_X": VOLUME_X, "VOLUME_MIN_MOVE": VOLUME_MIN_MOVE}
+CFG_VERSION = 0
+
 _last_sent: dict[tuple[str, str], float] = {}
 _profiles: dict[str, tuple[float, object]] = {}
+
+
+class AlertMsg(str):
+    """Alarm metni + kayıt numarası (👍/👎 butonları için)."""
+    event_id: int | None = None
+
+
+def _alert(text: str, item: str, kind: str, m: dict, day_ch: float) -> AlertMsg:
+    import learn
+    msg = AlertMsg(text)
+    msg.event_id = learn.log_event(item, kind, True, m, day_ch)
+    return msg
 
 
 def _slot(ts) -> int:
@@ -181,8 +197,9 @@ def check_symbol(item: str, report: bool = False) -> list[str]:
             kind, cooldown = ("day_drop" if down else "day_pump"), COOLDOWN_DAILY
         if _due(code, kind, cooldown):
             title = "🚨🔻 ANİ DÜŞÜŞ" if down else "🚀🟢 ANİ YÜKSELİŞ"
-            msgs.append(f"{title} — {head}\n15 dk: {m['ch15']:+.2f}% · 1 saat: {m['ch1h']:+.2f}% · "
-                        f"gün: {day_ch:+.2f}%\nHacim: normalin {m['vol_x']:.1f} katı\n👉 {cmd}")
+            msgs.append(_alert(f"{title} — {head}\n15 dk: {m['ch15']:+.2f}% · 1 saat: {m['ch1h']:+.2f}% · "
+                               f"gün: {day_ch:+.2f}%\nHacim: normalin {m['vol_x']:.1f} katı\n👉 {cmd}",
+                               item, kind, m, day_ch))
     # Hacim alarmı: fiyat da oynamış olmalı; ani hareket alarmı zaten hacmi yazıyorsa ayrıca gönderme.
     # Testte hacim yönü tahmin etmedi (~%50) ama sonrasında hareketin sertleştiğini gösterdi.
     if (m["vol_x"] >= VOLUME_X and abs(m["ch15"]) >= VOLUME_MIN_MOVE and not fast
@@ -190,26 +207,32 @@ def check_symbol(item: str, report: bool = False) -> list[str]:
         res, sup = _levels(daily, m["price"])
         lv = " · ".join(x for x in (f"direnç {fmt_price(res)}" if res else "",
                                     f"destek {fmt_price(sup)}" if sup else "") if x)
-        msgs.append(f"📊🔥 YÜKSEK İŞLEM HACMİ — {head}\n"
-                    f"Son 15 dk hacmi bu saatin normalinin <b>{m['vol_x']:.1f} katı</b> · "
-                    f"fiyat 15 dk: {m['ch15']:+.2f}%\n"
-                    "⚡ Sert hareket ihtimali yüksek; yön hacimden tek başına okunamaz."
-                    + (f"\nYakın seviyeler: {lv}" if lv else "") + f"\n👉 {cmd}")
+        msgs.append(_alert(f"📊🔥 YÜKSEK İŞLEM HACMİ — {head}\n"
+                           f"Son 15 dk hacmi bu saatin normalinin <b>{m['vol_x']:.1f} katı</b> · "
+                           f"fiyat 15 dk: {m['ch15']:+.2f}%\n"
+                           "⚡ Sert hareket ihtimali yüksek; yön hacimden tek başına okunamaz."
+                           + (f"\nYakın seviyeler: {lv}" if lv else "") + f"\n👉 {cmd}",
+                           item, "volume", m, day_ch))
+    if not msgs:  # eşiğe yaklaşan ama alarm olmayan olay: öğrenme için kaydet
+        import learn
+        learn.maybe_log_candidate(item, m, day_ch)
     if not is_bist:
         try:
             import futures
             fa = futures.funding_alert(code)
             if fa and _due(code, "funding", COOLDOWN_DAILY):
-                msgs.append(f"🔔 VADELİ İŞLEM UYARISI — {head}\n{fa}\n👉 {cmd}")
+                msgs.append(_alert(f"🔔 VADELİ İŞLEM UYARISI — {head}\n{fa}\n👉 {cmd}", item, "funding", m, day_ch))
         except Exception as ex:  # noqa: BLE001
             log.warning("Fonlama kontrolü hatası (%s): %s", code, ex)
     for kind, text in _daily_signals(daily):
         if _due(code, kind, COOLDOWN_DAILY):
-            msgs.append(f"🔔 TEKNİK SİNYAL — {head}\n{text}\n👉 {cmd}")
+            msgs.append(_alert(f"🔔 TEKNİK SİNYAL — {head}\n{text}\n👉 {cmd}", item, kind, m, day_ch))
     return msgs
 
 
 def check_all(report: bool = False, items: list[str] | None = None) -> list[str]:
+    import learn
+    learn.apply_config()
     msgs = []
     for item in items or WATCHLIST:
         try:
@@ -223,6 +246,8 @@ def check_all(report: bool = False, items: list[str] | None = None) -> list[str]
 
 def check_items(items: list[str]) -> dict[str, list[str]]:
     """Her varlık için alarm mesajlarını ayrı ayrı döndürür (sohbet bazlı dağıtım için)."""
+    import learn
+    learn.apply_config()  # haftalık ayarla güncellenmiş eşikler
     out = {}
     for item in items:
         try:
