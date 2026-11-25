@@ -553,8 +553,9 @@ async def alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with Waiting(update, "⏳ Takip listesi kontrol ediliyor..."):
             items = await run(F.alert_items, chat)
             lines = await run(lambda: alerts.check_all(True, items))
-        await reply(update, "📋 Anlık durum (alarm eşikleri: 15dk ±%{}, 1s ±%{}, hacim {}x + fiyat ±%{})\n\n{}".format(
-            alerts.DROP_15M, alerts.DROP_1H, alerts.VOLUME_X, alerts.VOLUME_MIN_MOVE, "\n".join(lines)), html_mode=False)
+        await reply(update, "📋 Anlık durum — parantez içi: o varlığın normal hareketinin kaç katı\n"
+                            "(alarm eşikleri: ani hareket {:g}x, trend 2 saatte {:g}x, hacim {:g}x)\n\n{}".format(
+                                alerts.K15, alerts.TREND_K, alerts.VOLUME_X, "\n".join(lines)), html_mode=False)
     else:
         s = await run(F.get_settings, chat)
         items = await run(F.alert_items, chat)
@@ -563,8 +564,13 @@ async def alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"İzlenenler (takip listesi + portföy): {', '.join(F.label(i) for i in items)}\n"
             f"Kontrol sıklığı: {CHECK_EVERY // 60} dakikada bir\n\n"
             "Alarm türleri:\n"
-            f"• Ani düşüş/yükseliş: 15 dk'da ±%{alerts.DROP_15M} veya 1 saatte ±%{alerts.DROP_1H}\n"
-            f"• Yüksek hacim: son 15 dk hacmi o saatin normalinin {alerts.VOLUME_X} katı ve fiyat ±%{alerts.VOLUME_MIN_MOVE} oynamış\n"
+            "Eşikler her varlığın kendi oynaklığına göredir (BTC ile PEPE aynı ölçülmez) ve her pazartesi "
+            "otomatik ayarlanır (/alarmkarne):\n"
+            f"• Ani düşüş/yükseliş: 15 dk'da normal hareketin {alerts.K15:g} katı veya 1 saatte {alerts.K1H:g} katı "
+            f"(en az ±%{alerts.FLOOR_15M:g} / ±%{alerts.FLOOR_1H:g})\n"
+            f"• Trend başlangıcı: 2 saatte normalin {alerts.TREND_K:g} katı, aynı yönde sürüyor, hacim artmış, ADX yükseliyor\n"
+            f"• Yüksek hacim: son 15 dk hacmi o saatin normalinin {alerts.VOLUME_X:g} katı ve fiyat normalin "
+            f"{alerts.VOLUME_K:g} katı oynamış\n"
             "• Teknik sinyal: günlük SAR trend dönüşü, RSI 30/70 geçişi\n"
             "• Fiyat hedefleri: /hedef\n\n"
             "/alarm ac · /alarm kapat · /alarm durum (anlık ölçümler)" + db_warning())
@@ -762,11 +768,21 @@ def _tune_report(force: bool = False) -> str:
     return learn.weekly_text(rep, ai_text)
 
 
+async def _all_alert_items() -> list[str]:
+    chats = await run(F.recipients, "alerts_on")
+    items = set()
+    for c in chats:
+        items.update(await run(F.alert_items, c))
+    return sorted(items)
+
+
 async def tune_job(context: ContextTypes.DEFAULT_TYPE):
-    """Pazartesi sabahı: eşik ayar turu (otomatik uygular) + rapor."""
+    """Pazartesi sabahı: geçmişi yeniden oynat (yeni eklenen varlıklar da dahil olsun) → eşik ayarı
+    (otomatik uygular) → rapor."""
     if datetime.now(F.TR).weekday() != 0:
         return
-    text = await run(_tune_report)
+    res = await run(learn.backfill, await _all_alert_items())
+    text = learn.backfill_text(res) + "\n\n" + await run(_tune_report)
     for chat in await run(F.recipients, "alerts_on"):
         await send_html(context.bot, chat, text)
 
@@ -783,6 +799,12 @@ async def alarmkarne(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif arg in ("ayarla", "ayar", "tune"):
         async with Waiting(update, "⏳ Eşik kombinasyonları deneniyor..."):
             text = await run(_tune_report)
+        await reply(update, text)
+    elif arg in ("gecmis", "geçmiş", "baslat"):
+        async with Waiting(update, f"⏳ Son {learn.BACKFILL_DAYS} gün yeniden oynatılıyor ve eşikler deneniyor "
+                                   "(birkaç dakika sürebilir)..."):
+            res = await run(learn.backfill, await _all_alert_items() or await run(F.alert_items, update.effective_chat.id))
+            text = learn.backfill_text(res) + "\n\n" + await run(_tune_report)
         await reply(update, text)
     else:
         await reply(update, await run(learn.status_text))

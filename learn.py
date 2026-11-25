@@ -26,12 +26,12 @@ import store
 log = logging.getLogger("learn")
 TR = timezone(timedelta(hours=3))
 
-TUNABLE = ("DROP_15M", "DROP_1H", "VOLUME_X", "VOLUME_MIN_MOVE")
-LIMITS = {"DROP_15M": (1.0, 6.0), "DROP_1H": (1.5, 10.0), "VOLUME_X": (2.0, 10.0), "VOLUME_MIN_MOVE": (0.2, 2.0)}
-STEPS = (0.8, 0.9, 1.0, 1.1, 1.25)     # bir turda en fazla %25 değişim
-CAND_FRACTION = 0.5                    # eşiğin bu oranına ulaşan olay aday olarak kaydedilir
+TUNABLE = ("K15", "K1H", "VOLUME_X", "VOLUME_K", "TREND_K")
+LIMITS = {"K15": (4.0, 25.0), "K1H": (4.0, 25.0), "VOLUME_X": (2.0, 10.0), "VOLUME_K": (1.0, 10.0),
+          "TREND_K": (2.0, 10.0)}
+STEPS = (0.8, 0.9, 1.0, 1.1, 1.25)     # bir turda en fazla %25 değişim (5 eşik → 3125 kombinasyon)
 CAND_GAP = 900                         # aynı varlık için iki aday kaydı arasında en az 15 dk
-SIM_COOLDOWN = 2 * 3600                # simülasyonda aynı varlık+tür için alarm tekrar süresi
+BACKFILL_DAYS = 14                     # geçmişi yeniden oynatma süresi
 TUNE_DAYS = 14                         # ayar için bakılan geçmiş
 MIN_DATA_DAYS = 7                      # ilk ayar için en az bu kadar günlük kayıt
 MIN_FIRED = 12                         # simülasyonda en az bu kadar alarm çıkmalı
@@ -40,8 +40,9 @@ MAX_PER_ITEM_DAY = 2.5                 # bundan sık alarm üreten ayar kabul ed
 MIN_GAIN = 0.03                        # yeni ayar skoru en az bu kadar iyi olmalı
 MIN_VOTES = 8                          # hedef tanımı oylardan seçmek için gereken oy
 RETENTION_DAYS = 90
-TUNED_KINDS = ("candidate", "drop", "pump", "volume")
-DIRECTIONAL = {"drop": -1, "day_drop": -1, "pump": 1, "day_pump": 1}
+TUNED_KINDS = ("candidate", "drop", "pump", "volume", "trend_up", "trend_down")
+DIRECTIONAL = {"drop": -1, "day_drop": -1, "trend_down": -1, "pump": 1, "day_pump": 1, "trend_up": 1}
+METRIC_COLS = ("ch15", "ch1h", "ch2h", "z15", "z1h", "z2h", "vol_x", "vol2x", "adx")
 
 # "İşe yaradı" tanımları: (açıklama, fonksiyon(olay, yön) -> True/False/None)
 DEFINITIONS = {
@@ -105,9 +106,9 @@ def direction(r: dict) -> int | None:
 
 def _norm(r: dict) -> dict:
     out = dict(r)
-    for k in ("price", "ch15", "ch1h", "day_ch", "vol_x", "typ4", "typ24", "ret1h", "ret4h",
-              "up4", "dn4", "ret24h", "up24", "dn24"):
+    for k in ("price", "day_ch", "typ4", "typ24", "ret1h", "ret4h", "up4", "dn4", "ret24h", "up24", "dn24") + METRIC_COLS:
         out[k] = _f(r.get(k))
+    out["adx_up"] = r.get("adx_up") in (True, "true", 1)
     return out
 
 
@@ -155,14 +156,22 @@ def save_config(params: dict, version: int):
 
 
 # ---------------- 1. Kayıt ----------------
+def _row(at: datetime, item: str, kind: str, sent: bool, m: dict, day_ch: float, version: int,
+         source: str) -> dict:
+    row = {"at": _iso(at), "item": item, "kind": kind, "sent": sent, "cfg_version": version,
+           "price": float(m["price"]), "day_ch": round(float(day_ch), 3), "hour": at.astimezone(TR).hour,
+           "stage": 0, "source": source, "adx_up": bool(m.get("adx_up"))}
+    for k in METRIC_COLS:
+        v = m.get(k)
+        row[k] = None if v is None or (isinstance(v, float) and math.isnan(v)) else round(float(v), 3)
+    return row
+
+
 def log_event(item: str, kind: str, sent: bool, m: dict, day_ch: float) -> int | None:
     if not _db_ok():
         return None
     import alerts
-    row = {"at": _iso(_now()), "item": item, "kind": kind, "sent": sent,
-           "cfg_version": getattr(alerts, "CFG_VERSION", 0), "price": m["price"],
-           "ch15": round(m["ch15"], 3), "ch1h": round(m["ch1h"], 3), "day_ch": round(day_ch, 3),
-           "vol_x": round(float(m["vol_x"]), 2), "hour": datetime.now(TR).hour, "stage": 0}
+    row = _row(_now(), item, kind, sent, m, day_ch, getattr(alerts, "CFG_VERSION", 0), "live")
     try:
         res = store.insert("alert_events", row)
         if kind in TUNED_KINDS:
@@ -176,10 +185,7 @@ def log_event(item: str, kind: str, sent: bool, m: dict, day_ch: float) -> int |
 def maybe_log_candidate(item: str, m: dict, day_ch: float):
     """Eşiğe yaklaşan ama alarm olmayan olay: simülasyonun 'kaçırılanları' görebilmesi için."""
     import alerts
-    f = CAND_FRACTION
-    near = (abs(m["ch15"]) >= alerts.DROP_15M * f or abs(m["ch1h"]) >= alerts.DROP_1H * f
-            or (m["vol_x"] >= alerts.VOLUME_X * f and abs(m["ch15"]) >= alerts.VOLUME_MIN_MOVE * f))
-    if near and time.time() - _last_cand.get(item, 0) >= CAND_GAP:
+    if alerts.near(m, alerts.params()) and time.time() - _last_cand.get(item, 0) >= CAND_GAP:
         log_event(item, "candidate", False, m, day_ch)
 
 
@@ -273,6 +279,100 @@ def resolve_events(limit: int = 120) -> int:
     return done
 
 
+# ---------------- Geçmişi yeniden oynatma (backfill) ----------------
+def _history(item: str, days: int):
+    """Yeniden oynatma için 5 dakikalık geçmiş (+10 gün ısınma: tipik hareket ve hacim profili için)."""
+    from data import get_klines_since, get_stock_klines
+    if _is_bist(item):
+        return get_stock_klines(_code(item) + ".IS", "5m", "60d")[0]
+    import pandas as pd
+    start = int((_now() - timedelta(days=days + 11)).timestamp() * 1000)
+    parts, end = [], int(_now().timestamp() * 1000)
+    while start < end:
+        df = get_klines_since(_code(item) + "USDT", "5m", start, 1000)
+        if df.empty:
+            break
+        parts.append(df)
+        start = int(df.index[-1].timestamp() * 1000) + 1
+        if len(df) < 1000:
+            break
+    return pd.concat(parts).loc[lambda d: ~d.index.duplicated()]
+
+
+def _replay_item(item: str, days: int, until: datetime) -> list[dict]:
+    """Bir varlığın geçmişini canlı kontrolle aynı ölçüm/karar koduyla yeniden oynatır.
+    Eşiğe yaklaşan anları (15 dk arayla) sonuçlarıyla birlikte olay satırı olarak döndürür."""
+    import pandas as pd
+    import alerts
+    df = _history(item, days)
+    bist = _is_bist(item)
+    lc = np.log(df["close"])
+    typ = {f"t{n}": ((lc - lc.shift(b)).abs().rolling("10D", min_periods=200).median().shift(1) * 100)
+           for n, b in (("15", 3), ("1h", 12), ("2h", 24))}
+    recent = df["volume"].shift(1).rolling(3).sum()
+    key = pd.Series([alerts._slot(t) for t in df.index], index=df.index).shift(3)
+    tod = recent.groupby(key).transform(lambda s: s.shift(1).rolling(30, min_periods=6).median())
+    f = alerts.metrics_frame(df, typ, tod, session_only=bist)
+    P = alerts.params()
+    typ4, typ24 = typical(item)
+    start = _now() - timedelta(days=days)
+    rows, last = [], -1e18
+    idx = df.index
+    for t, r in f[(f.index >= start) & (f.index <= until)].iterrows():
+        if any(pd.isna(r[k]) for k in ("t15", "t1h", "t2h")) or not alerts.near(r, P):
+            continue
+        ts = t.timestamp()
+        if ts - last < CAND_GAP:
+            continue
+        last = ts
+        price = float(r["price"])
+        row = _row(t.to_pydatetime(), item, "candidate", False, r.to_dict(), 0.0, -1, "backfill")
+        row.update(dict.fromkeys(("ret1h", "ret4h", "up4", "dn4", "ret24h", "up24", "dn24")))  # toplu ekleme: aynı anahtarlar
+        i = idx.searchsorted(t, side="right")
+        for h, cols in ((1, ("ret1h", None, None)), (4, ("ret4h", "up4", "dn4")), (24, ("ret24h", "up24", "dn24"))):
+            j = idx.searchsorted(t + timedelta(hours=h), side="right")
+            if t + timedelta(hours=h) > idx[-1] or j <= i:
+                continue
+            w = df.iloc[i:j]
+            row[cols[0]] = round((float(w["close"].iloc[-1]) / price - 1) * 100, 3)
+            if cols[1]:
+                row[cols[1]] = round((float(w["high"].max()) / price - 1) * 100, 3)
+                row[cols[2]] = round((float(w["low"].min()) / price - 1) * 100, 3)
+        if row.get("ret4h") is None:
+            continue
+        row.update({"typ4": round(typ4, 3), "typ24": round(typ24, 3), "stage": 2 if row.get("ret24h") is not None else 1})
+        rows.append(row)
+    return rows
+
+
+def backfill(items: list[str], days: int = BACKFILL_DAYS) -> dict[str, int]:
+    """Son `days` günü yeniden oynatıp alert_events'e (source='backfill') yazar; öncekini siler.
+    Canlı kayıtların başladığı andan sonrası oynatılmaz (çift sayılmasın)."""
+    out = {}
+    live = [r for r in _events(_now() - timedelta(days=days)) if r.get("source") != "backfill"]
+    for item in items:
+        try:
+            first_live = min((_parse(r["at"]) for r in live if r["item"] == item), default=_now())
+            rows = _replay_item(item, days, min(first_live, _now() - timedelta(hours=4)))
+            store.delete("alert_events", {"item": item, "source": "backfill"})
+            store.insert_many("alert_events", rows)
+            out[item] = len(rows)
+        except Exception as ex:  # noqa: BLE001
+            log.warning("Geçmiş yeniden oynatılamadı (%s): %s", item, ex)
+            out[item] = -1
+    return out
+
+
+def backfill_text(res: dict[str, int]) -> str:
+    ok = {k: v for k, v in res.items() if v >= 0}
+    bad = [k for k, v in res.items() if v < 0]
+    s = (f"⏪ Son {BACKFILL_DAYS} gün yeniden oynatıldı: " +
+         ", ".join(f"{k.replace('BIST:', '')} {v} olay" for k, v in ok.items()))
+    if bad:
+        s += f"\n⚠️ Oynatılamayan: {', '.join(bad)}"
+    return s
+
+
 def cleanup():
     try:
         store.delete("alert_events", {"at": ("lt", _iso(_now() - timedelta(days=RETENTION_DAYS)))})
@@ -323,38 +423,60 @@ def choose_definition(events_by_id: dict, votes: list[dict]) -> tuple[str, str]:
 
 
 # ---------------- 4. Simülasyon ve ayar ----------------
-def simulate(rows: list[dict], params: dict, definition: str) -> dict:
-    """Verilen eşiklerle bu olaylardan hangileri alarm olurdu; isabet, yakalama ve F0.5 skoru."""
-    last: dict[tuple[str, str], float] = {}
-    fired = hits = 0
-    items_days = set()
-    positives = sum(1 for r in rows if r["_lab"])
-    for r in rows:
-        c15, c1h, vx = abs(r["ch15"] or 0), abs(r["ch1h"] or 0), r["vol_x"] or 0
-        fast = c15 >= params["DROP_15M"] or c1h >= params["DROP_1H"]
-        vol = vx >= params["VOLUME_X"] and c15 >= params["VOLUME_MIN_MOVE"] and not fast
-        typ = "fast" if fast else "volume" if vol else None
-        if not typ:
-            continue
-        key = (r["item"], typ)
-        if r["_ts"] - last.get(key, -1e18) < SIM_COOLDOWN:
-            continue
-        last[key] = r["_ts"]
-        fired += 1
-        hits += int(r["_lab"])
-        items_days.add((r["item"], r["_day"]))
-    prec = hits / fired if fired else 0.0
-    rec = hits / positives if positives else 0.0
-    b2 = 0.25  # F0.5: isabet yakalamadan 2 kat önemli
-    f = (1 + b2) * prec * rec / (b2 * prec + rec) if prec + rec else 0.0
-    per_day = fired / max(len({r["_day"] for r in rows}), 1) / max(len({r["item"] for r in rows}), 1)
-    return {"fired": fired, "hits": hits, "precision": prec, "recall": rec, "f": f, "per_item_day": per_day}
+class Sim:
+    """Simülasyon için olaylar numpy dizilerine çevrilir (3125 kombinasyon hızlı denensin).
+    Karar mantığı alerts.classify ile aynıdır (vektör hali)."""
+
+    def __init__(self, rows: list[dict]):
+        import alerts
+        P = alerts.params()
+        self.rows = rows
+        g = lambda k: np.array([abs(r[k] or 0.0) for r in rows])  # noqa: E731
+        self.az15, self.az1h, self.az2h = g("z15"), g("z1h"), g("z2h")
+        self.ac15, self.ac1h, self.vx = g("ch15"), g("ch1h"), np.array([r["vol_x"] or 0.0 for r in rows])
+        self.tok = np.array([alerts.trend_ok(r, P) for r in rows])   # eşikten bağımsız trend koşulları
+        self.lab = np.array([r["_lab"] for r in rows])
+        self.ts = np.array([r["_ts"] for r in rows])
+        self.item = [r["item"] for r in rows]
+        self.floor15, self.floor1h = P["FLOOR_15M"], P["FLOOR_1H"]
+        self.n_days = max(len({r["_day"] for r in rows}), 1)
+        self.n_items = max(len(set(self.item)), 1)
+
+    def run(self, p: dict) -> dict:
+        import alerts
+        fast = ((self.az15 >= p["K15"]) & (self.ac15 >= self.floor15)) | \
+               ((self.az1h >= p["K1H"]) & (self.ac1h >= self.floor1h))
+        vol = ~fast & (self.vx >= p["VOLUME_X"]) & (self.az15 >= p["VOLUME_K"])
+        trd = ~fast & self.tok & (self.az2h >= p["TREND_K"])
+        fired = hits = 0
+        caught = np.zeros(len(self.rows), dtype=bool)
+        for typ, mask in (("fast", fast), ("volume", vol), ("trend", trd)):
+            cd = alerts.COOLDOWNS[typ]
+            last: dict[str, float] = {}
+            for i in np.flatnonzero(mask):
+                if self.ts[i] - last.get(self.item[i], -1e18) < cd:
+                    continue
+                last[self.item[i]] = self.ts[i]
+                fired += 1
+                hits += int(self.lab[i])
+                caught[i] = True
+        positives = int(self.lab.sum())
+        prec = hits / fired if fired else 0.0
+        rec = int((caught & self.lab).sum()) / positives if positives else 0.0
+        b2 = 0.25  # F0.5: isabet yakalamadan 2 kat önemli
+        f = (1 + b2) * prec * rec / (b2 * prec + rec) if prec + rec else 0.0
+        return {"fired": fired, "hits": hits, "precision": prec, "recall": rec, "f": f,
+                "per_item_day": fired / self.n_days / self.n_items}
+
+
+def simulate(rows: list[dict], params: dict, definition: str = DEFAULT_DEF) -> dict:
+    return Sim(rows).run(params)
 
 
 def _prepare(rows: list[dict], definition: str) -> list[dict]:
     out = []
     for r in rows:
-        if r.get("kind") not in TUNED_KINDS:
+        if r.get("kind") not in TUNED_KINDS or r.get("z15") is None:
             continue
         lab = label(r, definition)
         if lab is None:
@@ -381,7 +503,8 @@ def tune(apply: bool = True, force: bool = False) -> dict:
     votes = _votes()
     definition, why = choose_definition(by_id, votes)
     rows = _prepare(raw, definition)
-    base = simulate(rows, cur, definition)
+    sim = Sim(rows)
+    base = sim.run(cur)
     rep = {"status": "ok", "cur": cur, "version": cfg["version"], "definition": definition, "why": why,
            "data_days": data_days, "n_rows": len(rows), "base": base, "new": cur, "best": base, "applied": False,
            "agreement": definition_agreement(by_id, votes)}
@@ -391,7 +514,7 @@ def tune(apply: bool = True, force: bool = False) -> dict:
     best, best_p = base, cur
     for steps in itertools.product(STEPS, repeat=len(TUNABLE)):
         p = {k: round(min(max(cur[k] * s, LIMITS[k][0]), LIMITS[k][1]), 2) for k, s in zip(TUNABLE, steps)}
-        res = simulate(rows, p, definition)
+        res = sim.run(p)
         if res["fired"] < MIN_FIRED or res["per_item_day"] > MAX_PER_ITEM_DAY:
             continue
         if res["f"] > best["f"] + 1e-9 or (math.isclose(res["f"], best["f"]) and res["fired"] < best["fired"]):
@@ -408,10 +531,12 @@ def tune(apply: bool = True, force: bool = False) -> dict:
 
 
 # ---------------- Raporlar ----------------
-NAMES = {"DROP_15M": "Ani hareket (15 dk) %", "DROP_1H": "Ani hareket (1 saat) %",
-         "VOLUME_X": "Hacim katı", "VOLUME_MIN_MOVE": "Hacim alarmı için fiyat %"}
+NAMES = {"K15": "Ani hareket 15 dk (normalin katı)", "K1H": "Ani hareket 1 saat (normalin katı)",
+         "VOLUME_X": "Hacim (normalin katı)", "VOLUME_K": "Hacim alarmı için fiyat (normalin katı)",
+         "TREND_K": "Trend başlangıcı 2 saat (normalin katı)"}
 KIND_TR = {"drop": "ani düşüş", "pump": "ani yükseliş", "volume": "yüksek hacim", "day_drop": "BIST gün içi düşüş",
-           "day_pump": "BIST gün içi yükseliş", "funding": "vadeli işlem", "candidate": "aday"}
+           "day_pump": "BIST gün içi yükseliş", "funding": "vadeli işlem", "candidate": "aday",
+           "trend_up": "yükseliş trendi", "trend_down": "düşüş trendi"}
 
 
 def _pct(a, b):
@@ -450,7 +575,8 @@ def daily_text(items: list[str]) -> str | None:
     """Dünün alarm karnesi (HTML). Kayıt yoksa None."""
     today = datetime.now(TR).replace(hour=0, minute=0, second=0, microsecond=0)
     start = today - timedelta(days=1)
-    rows = [r for r in _events(start.astimezone(timezone.utc)) if _parse(r["at"]) < today]
+    rows = [r for r in _events(start.astimezone(timezone.utc))
+            if _parse(r["at"]) < today and r.get("source") != "backfill"]
     sent = [r for r in rows if r.get("sent")]
     cands = [r for r in rows if r.get("kind") == "candidate"]
     if not rows:
@@ -559,7 +685,9 @@ def status_text() -> str:
     for k in TUNABLE:
         L.append(f"• {NAMES[k]}: <b>{float(cfg['params'][k]):g}</b>")
     try:
-        rows = _events(_now() - timedelta(days=7))
+        allrows = _events(_now() - timedelta(days=TUNE_DAYS))
+        rows = [r for r in allrows if r.get("source") != "backfill" and _parse(r["at"]) >= _now() - timedelta(days=7)]
+        replay = sum(1 for r in allrows if r.get("source") == "backfill")
     except Exception as ex:  # noqa: BLE001
         return "\n".join(L) + ("\n\n⚠️ Alarm kayıt tabloları okunamadı. Supabase SQL Editor'de "
                                f"<code>supabase_migration_3.sql</code> çalıştırılmalı.\n({str(ex)[:150]})")
@@ -573,6 +701,7 @@ def status_text() -> str:
             L.append(f"• {desc}: {_pct(sum(s), len(s))} ({sum(s)}/{len(s)})")
     votes = _votes()
     L.append(f"Toplam oy: {len(votes)} (hedef tanımı seçmek için {MIN_VOTES} gerekli)")
+    L.append(f"Geçmişten yeniden oynatılmış olay: {replay}" + ("" if replay else " — /alarmkarne gecmis ile başlat"))
     try:
         runs = store.select("tune_runs", order="id.desc")[:1]
         if runs:
@@ -582,7 +711,8 @@ def status_text() -> str:
     except Exception:  # noqa: BLE001
         pass
     L.append("")
-    L.append("<i>/alarmkarne dun — dünün karnesi · /alarmkarne ayarla — ayar turunu şimdi çalıştır</i>")
+    L.append("<i>/alarmkarne dun — dünün karnesi · /alarmkarne ayarla — ayar turunu şimdi çalıştır · "
+             "/alarmkarne gecmis — son 14 günü yeniden oynatıp hemen ayarla</i>")
     return "\n".join(L)
 
 

@@ -157,6 +157,24 @@ def insert(table, row, upsert=False):
         return row
 
 
+def insert_many(table, rows: list[dict]):
+    """Toplu ekleme (hepsi aynı anahtarlara sahip olmalı). Supabase'te 500'lük parçalar halinde."""
+    if not rows:
+        return
+    if using_supabase():
+        for i in range(0, len(rows), 500):
+            _sb("POST", table, body=rows[i:i + 500], extra_headers={"Prefer": "return=minimal"})
+        return
+    with _lock:
+        db = _load()
+        cur = db.setdefault(table, [])
+        nid = max([r.get("id", 0) for r in cur] + [0])
+        for r in rows:
+            nid += 1
+            cur.append({"id": nid, **r} if table not in _NO_ID else r)
+        _save(db)
+
+
 def update(table, values, filters):
     if using_supabase():
         return _sb("PATCH", table, filters, body=values)

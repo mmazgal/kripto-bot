@@ -22,7 +22,7 @@ Tamamen ücretsiz servislerle çalışır: Render (sunucu), Supabase (veritaban�
 | 📰 | **Haberler** | Her analizin altında o varlıkla ilgili son 3 Türkçe haber |
 | 🌡 | **Piyasa havası** | Kripto Korku/Açgözlülük endeksi, BTC dominansı, BIST 100 günlük değişim, USD/TRY |
 | ⚖️ | **Karşılaştırma** | Birden fazla varlığı tek tabloda: günlük/haftalık değişim, RSI, 1H/1A yönü |
-| 🚨 | **Alarmlar** | Ani düşüş/yükseliş, hacim patlaması, SAR trend dönüşü, RSI aşırı alım/satım |
+| 🚨 | **Alarmlar** | Ani düşüş/yükseliş, trend başlangıcı, hacim patlaması, SAR trend dönüşü, RSI aşırı alım/satım; eşikler her varlığın kendi oynaklığına göre |
 | 🎯 | **Fiyat hedefi** | Belirlediğin seviye yukarı/aşağı kırılınca haber |
 | ☀️ | **Sabah özeti** | Her gün 09:00'da piyasa havası + takip listesinin durumu |
 | 💼 | **Portföy** | Kâr/zarar takibi; kripto ($) + BIST (₺) ve TL cinsinden genel toplam |
@@ -78,6 +78,7 @@ Tamamen ücretsiz servislerle çalışır: Render (sunucu), Supabase (veritaban�
 | `/karne` | Geçmiş tahminlerin yön doğruluğu ve aralık isabeti |
 | `/alarmkarne` | Alarm öğrenme durumu: güncel eşikler, son 7 günün isabeti, oy sayısı |
 | `/alarmkarne dun` · `/alarmkarne ayarla` | Dünün alarm karnesi · eşik ayar turunu hemen çalıştır |
+| `/alarmkarne gecmis` | Takip edilen varlıkların son 14 gününü yeniden oynatır ve hemen ayar turu yapar (bir hafta beklemeden) |
 | `/sanal` | Botun sanal portföyü (kripto $10k, BIST ₺100k ile başladı) |
 | `/yz` | Yapay zekâ (Gemini) bağlantı testi: anahtar var mı, hangi model çalışıyor, son hata |
 | `/start` | Tüm komutlar + chat ID |
@@ -105,13 +106,24 @@ Hisseler kodla ya da şirket adıyla bulunur (`aselsan` → `ASELS`).
 ### Alarmlar (her 5 dakikada bir)
 | Alarm | Koşul | Tekrar |
 |---|---|---|
-| 🚨 Ani düşüş / 🚀 ani yükseliş | 15 dk'da ±%2.5 veya 1 saatte ±%4 (BIST'te ayrıca gün içi ±%4) | 2 saatte bir |
-| 📊 Yüksek hacim | Son 15 dk hacmi **o saatin normalinin** 4 katı **ve** fiyat 15 dk'da en az ±%0.7 oynamış (aynı anda ani hareket alarmı varsa ayrıca gönderilmez) | 2 saatte bir |
+| 🚨 Ani düşüş / 🚀 ani yükseliş | 15 dk'da varlığın normal 15 dk hareketinin **10 katı** veya 1 saatte normalin **10 katı** (en az ±%0.8 / ±%1.2). BIST'te ayrıca gün içi ±%4 (günde bir) | 2 saatte bir |
+| 📈 Trend başlangıcı | 2 saatte normalin **4 katı**, son 1 saatte de aynı yönde sürüyor, son 2 saatin hacmi normalin 1.3 katı, 15 dk ADX ≥ 20 ve yükseliyor | 4 saatte bir |
+| 📊 Yüksek hacim | Son 15 dk hacmi **o saatin normalinin** 4 katı **ve** fiyat 15 dk'da normalin en az 4 katı oynamış (aynı anda ani hareket alarmı varsa ayrıca gönderilmez) | 2 saatte bir |
 | 🔔 Teknik sinyal | Günlük SAR trend dönüşü, RSI 30'un altına / 70'in üstüne geçiş | Günde bir |
 | 🎯 Fiyat hedefi | `/hedef` ile kurulan seviye kırıldığında | Bir kez |
 
 İzlenen varlıklar: takip listesi + portföydekiler. BIST hisseleri yalnızca seans saatlerinde (hafta içi 10:00–18:10) kontrol edilir.
-Eşikler `alerts.py` dosyasının başındadır.
+Başlangıç eşikleri `alerts.py` dosyasının başındadır; ani hareket, trend ve hacim eşikleri her pazartesi otomatik ayarlanır
+(güncel değerler: `/alarm` veya `/alarmkarne`). Tablodaki sayılar başlangıç değerleridir.
+
+**Neden "normalin katı"?** Sabit yüzde her coinde farklı anlama geliyordu: 30 günlük veride (Kasım 2026) "15 dk'da %2.5 /
+1 saatte %4" kuralı BTC'de günde 0.25, SOL'de 0.35, DOGE'de 0.45, PEPE'de 0.9 alarm üretiyordu (BTC için %2.5 normalin 16
+katı, PEPE için 9 katı). "Normal hareket" = o varlığın son ~10 gündeki 15 dk / 1 saat / 2 saatlik mutlak hareketlerinin
+medyanı (saatlik yenilenir). Taban yüzdeler, çok sakin varlıklarda anlamsız küçük hareketlerin alarm olmasını engeller.
+
+**Trend başlangıcı neden var?** Alarm karnesinde kaçırılan büyük hareketlerin çoğu 15 dakikalık patlamalar değil, 2-4 saate
+yayılan istikrarlı hareketlerdi. Geçmişin yeniden oynatılmasında (BTC+SOL+THYAO, 14 gün) trend alarmlarından sonra 4 saatte
+sert hareket oranı %79, 24 saatte aynı yönde güçlü trend %43 çıktı; sıradan anlarda bu oranlar %46 ve %32 (küçük örneklem).
 
 **Hacim alarmının mantığı:** "Normal" hacim, o 15 dakikalık saat diliminin son ~10 gündeki medyanı ile son 24 saatin
 medyanından büyüğüdür. Böylece ABD borsasının açılışı (16:30) veya BIST açılış/kapanış seansı gibi her gün tekrarlanan
@@ -133,17 +145,23 @@ Adım adım doğruya yaklaşma döngüsü: **kaydet → sonucu ölç → puanla 
    Alarmların altındaki **👍/👎** oylarıyla en çok örtüşen tanım hedef seçilir (en az 8 oy; o zamana kadar *sert*).
 4. **Günlük karne (09:10):** Dünün alarmları, her tanıma göre isabet (gönderilen vs adaylar), oylar ve
    dünün büyük hareketlerinden hangilerinde zamanında alarm olduğu.
-5. **Haftalık ayar (pazartesi 09:20, otomatik uygulanır):** Son 14 günün olayları üzerinde 625 eşik kombinasyonu
-   simüle edilir, F0.5 skoru (isabet, yakalamadan 2 kat önemli) en iyi olan seçilir. Korumalar: her eşik turda en
-   fazla %25 değişir (bu sayede kötü çıkan değişiklik sonraki hafta geri alınabilir), en az 7 günlük veri ve
-   12 simüle alarm gerekir, varlık başına günde 2.5'ten fazla alarm üreten ayar seçilmez, kazanç anlamlı değilse
-   değişiklik yapılmaz. Gemini sonuçları Türkçe yorumlar. Ayarlanan eşikler: ani hareket 15 dk / 1 saat, hacim katı,
-   hacim alarmı için fiyat değişimi.
+5. **Geçmişi yeniden oynatma:** Bir hafta veri beklemek yerine, takip edilen varlıkların son 14 günü 5 dakikalık
+   mumlarla **canlı kontrolle aynı kodla** (`alerts.metrics_frame` + `alerts.classify`) yeniden oynatılır; eşiğe
+   yaklaşan anlar sonuçlarıyla birlikte `source='backfill'` olarak kaydedilir. `/alarmkarne gecmis` ile hemen,
+   ayrıca her pazartesi ayar turundan önce otomatik çalışır (yeni eklenen varlıklar da dahil olsun). Canlı kayıtların
+   başladığı andan sonrası oynatılmaz (çift sayılmasın); karne ve durum raporları yalnız canlı kayıtları sayar.
+6. **Haftalık ayar (pazartesi 09:20, otomatik uygulanır):** Son 14 günün olayları üzerinde 3125 eşik kombinasyonu
+   (5 eşik × 5 adım) simüle edilir, F0.5 skoru (isabet, yakalamadan 2 kat önemli) en iyi olan seçilir. Korumalar: her
+   eşik turda en fazla %25 değişir (bu sayede kötü çıkan değişiklik sonraki hafta geri alınabilir), en az 7 günlük veri
+   ve 12 simüle alarm gerekir, varlık başına günde 2.5'ten fazla alarm üreten ayar seçilmez, kazanç anlamlı değilse
+   değişiklik yapılmaz. Gemini sonuçları Türkçe yorumlar. Ayarlanan eşikler (hepsi "normalin katı"): ani hareket
+   15 dk / 1 saat, hacim, hacim alarmı için fiyat, trend başlangıcı 2 saat.
 
-Veri boyutu: günde birkaç yüz satır (~1-2 MB/ay); 90 günden eski kayıtlar silinir.
-İlk deneme (BTC+SOL, 13 günlük geçmişin yeniden oynatılması, Kasım 2026): ani hareket alarmlarından sonra fiyat
-4 saatte daha sık **ters döndü** (%56) ve daha seyrek aynı yönde devam etti (%26). Bu küçük bir örneklem; öğrenme
-döngüsü bunu her hafta yeniden ölçer.
+Veri boyutu: günde birkaç yüz satır + yeniden oynatma (~1000 satır/hafta; ~2-3 MB/ay); 90 günden eski kayıtlar silinir.
+İlk denemeler (Kasım 2026, küçük örneklem): eski sabit eşikli ani hareket alarmlarından sonra fiyat 4 saatte daha sık
+**ters döndü** (%56, BTC+SOL 13 gün). Oynaklığa göre eşikle (BTC+SOL+THYAO 14 gün) ani hareket alarmlarından sonra
+4 saatte sert hareket %83 (sıradan anlarda %46), aynı yönde devam %44 (sıradan anlarda %29). Öğrenme döngüsü bunları
+her hafta yeniden ölçer.
 
 ### Geriye dönük test bulguları (Kasım 2026)
 `python backtest.py` ile 10 coin ve 11 BIST varlığında (2-5 yıl) ölçüldü:

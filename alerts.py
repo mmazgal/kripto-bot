@@ -1,6 +1,11 @@
-"""Fiyat/hacim alarmları: ani düşüş-yükseliş, hacim patlaması, günlük teknik sinyaller.
+"""Fiyat/hacim alarmları: ani hareket, trend başlangıcı, hacim patlaması, günlük teknik sinyaller.
 
-Takip listesi ve eşikler aşağıda. Değiştirmek için bu dosyayı düzenlemek yeterli.
+Eşikler her varlığın KENDİ oynaklığına göredir: "15 dakikada %2.5" yerine "15 dakikada normal hareketinin
+10 katı". Sabit yüzde BTC'de neredeyse hiç çalmıyordu (30 günde günde 0.25 alarm), PEPE'de ise 4 kat sık
+çalıyordu; oynaklığa göre eşikte coinler birbirine yaklaşır.
+
+metrics_frame() ve classify() hem canlı kontrolde hem de learn.py'deki geçmişi yeniden oynatmada aynen
+kullanılır; böylece öğrenme döngüsü canlıda olanın aynısını simüle eder.
 """
 import data  # noqa: F401  (SSL ayarları; diğer importlardan önce)
 
@@ -9,6 +14,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
+import pandas as pd
 
 import indicators as ta
 from analysis import CURRENCY, fmt_price
@@ -20,25 +26,37 @@ TR = timezone(timedelta(hours=3))
 # ---- Takip listesi ----  (kripto: sembol, BIST: "BIST:KOD")
 WATCHLIST = ["BTC", "SOL"]
 
-# ---- Eşikler ----
-DROP_15M = 2.5      # 15 dakikada ±% değişim
-DROP_1H = 4.0       # 1 saatte ±% değişim
-BIST_DAY = 4.0      # BIST: önceki kapanışa göre ±% gün içi değişim
-VOLUME_X = 4.0      # son 15 dk hacmi, "normal"in kaç katı. Normal = o saat diliminin son ~10 günlük
-                    # medyanı ile son 24 saatin medyanından büyüğü (ABD açılışı gibi her gün tekrarlanan
-                    # hacim artışları alarm sayılmaz)
-VOLUME_MIN_MOVE = 0.7  # hacim alarmı için fiyat 15 dk'da en az ±% bu kadar oynamış olmalı
-                       # (30 günlük testte alarm sayısı yarıya indi, sonraki hareket normalin ~2.7 katı)
-BASELINE_TTL = 3600    # saat dilimi hacim profili önbelleği (sn)
-COOLDOWN_FAST = 2 * 3600   # fiyat/hacim alarmı tekrar süresi (sn)
-COOLDOWN_DAILY = 20 * 3600  # günlük teknik sinyal tekrar süresi (sn)
+# ---- Eşikler (normal hareketin katı) ----  learn.py haftalık ayarlar; veritabanındaki ayar bunları ezer.
+K15 = 10.0          # ani hareket: 15 dk değişim, varlığın tipik 15 dk hareketinin kaç katı
+K1H = 10.0          # ani hareket: 1 saatlik değişim, tipik 1 saatlik hareketin kaç katı
+VOLUME_X = 4.0      # hacim: son 15 dk hacmi, o saatin normalinin kaç katı (normal = o 15 dk diliminin
+                    # son ~10 günlük medyanı ile son 24 saatin medyanından büyüğü)
+VOLUME_K = 4.0      # hacim alarmı için 15 dk fiyat değişimi tipik hareketin en az kaç katı olmalı
+TREND_K = 4.0       # trend başlangıcı: 2 saatlik değişim, tipik 2 saatlik hareketin kaç katı
+# ---- Sabit koşullar (ayarlanmaz) ----
+FLOOR_15M = 0.8     # çok sakin varlıklarda anlamsız küçük hareketler alarm olmasın: en az ±% (15 dk)
+FLOOR_1H = 1.2      # en az ±% (1 saat)
+TREND_VOL = 1.3     # trend: son 2 saatin hacmi normalin en az bu katı
+TREND_ADX = 20.0    # trend: 15 dakikalık ADX en az bu ve yükseliyor
+BIST_DAY = 4.0      # BIST: önceki kapanışa göre ±% gün içi değişim (günde bir)
+PROFILE_TTL = 3600  # hacim profili ve tipik hareket önbelleği (sn)
+COOLDOWN_FAST = 2 * 3600    # ani hareket / hacim alarmı tekrar süresi (sn)
+COOLDOWN_TREND = 4 * 3600   # trend alarmı tekrar süresi
+COOLDOWN_DAILY = 20 * 3600  # günlük teknik sinyal tekrar süresi
 
-# Yukarıdaki dört eşik learn.py tarafından haftalık ayarlanır; veritabanındaki ayar bunların üzerine yazılır.
-DEFAULTS = {"DROP_15M": DROP_15M, "DROP_1H": DROP_1H, "VOLUME_X": VOLUME_X, "VOLUME_MIN_MOVE": VOLUME_MIN_MOVE}
+TUNABLE = ("K15", "K1H", "VOLUME_X", "VOLUME_K", "TREND_K")
+DEFAULTS = {k: globals()[k] for k in TUNABLE}
 CFG_VERSION = 0
+COOLDOWNS = {"fast": COOLDOWN_FAST, "volume": COOLDOWN_FAST, "trend": COOLDOWN_TREND}
 
 _last_sent: dict[tuple[str, str], float] = {}
 _profiles: dict[str, tuple[float, object]] = {}
+
+
+def params() -> dict:
+    """Karar için kullanılan tüm eşikler (ayarlananlar + sabitler)."""
+    names = TUNABLE + ("FLOOR_15M", "FLOOR_1H", "TREND_VOL", "TREND_ADX")
+    return {k: float(globals()[k]) for k in names}
 
 
 class AlertMsg(str):
@@ -59,19 +77,95 @@ def _slot(ts) -> int:
     return t.hour * 60 + t.minute // 15 * 15
 
 
-def _volume_profile(item: str, fetch):
-    """Her 15 dk'lık saat dilimi için son günlerin medyan hacmi (önbellekli). Hata olursa None."""
+# ---------------- Ölçüm (canlı ve geri oynatmada ortak) ----------------
+def typical_from(close: pd.Series, bars: tuple[int, int, int]) -> dict:
+    """Tipik mutlak hareket (%): 15 dk / 1 saat / 2 saat (medyan). bars: o sürelerin mum sayısı."""
+    lc = np.log(close)
+    return {f"t{n}": float((lc - lc.shift(b)).abs().median() * 100) for n, b in zip(("15", "1h", "2h"), bars)}
+
+
+def _profile(item: str, fetch):
+    """15 dakikalık mumlardan: saat dilimi başına medyan hacim + tipik hareketler. Önbellekli; hata → None."""
     hit = _profiles.get(item)
-    if hit and time.time() - hit[0] < BASELINE_TTL:
+    if hit and time.time() - hit[0] < PROFILE_TTL:
         return hit[1]
     try:
-        v = fetch()["volume"].iloc[:-1]  # son (açık) mum hariç
-        prof = v.groupby([_slot(t) for t in v.index]).median()
+        df = fetch().iloc[:-1]  # son (açık) mum hariç
+        prof = {"vol": df["volume"].groupby([_slot(t) for t in df.index]).median(),
+                "typ": typical_from(df["close"], (1, 4, 8))}
     except Exception as ex:  # noqa: BLE001
         log.warning("Hacim profili alınamadı (%s): %s", item, ex)
         prof = None
     _profiles[item] = (time.time(), prof)
     return prof
+
+
+def metrics_frame(df5: pd.DataFrame, typ, tod=None, session_only: bool = False) -> pd.DataFrame:
+    """5 dakikalık mumların her satırı için ölçümler. Son satır = şu an (açık mum).
+    typ: {'t15','t1h','t2h'} sabit ya da satır bazında seri. tod: satır bazında o saat diliminin normal hacmi.
+    session_only (BIST): her gün seans başında önceki günün kapanışı "ani hareket" sanılmasın."""
+    c, v = df5["close"], df5["volume"]
+    f = pd.DataFrame(index=df5.index)
+    f["price"] = c
+    for name, k in (("15", 3), ("1h", 12), ("2h", 24)):
+        f["ch" + name] = (c / c.shift(k) - 1) * 100
+        f["t" + name] = typ["t" + name]
+        f["z" + name] = f["ch" + name] / f["t" + name]
+    recent = v.shift(1).rolling(3).sum()                      # son tamamlanmış 15 dk
+    base = v.rolling(3).sum().shift(4).rolling(288, min_periods=20).median()  # son ~24 saat
+    if tod is not None:
+        base = np.fmax(base, tod)
+    f["vol_x"] = (recent / base).where(base > 0, 0.0)
+    f["vol2x"] = (v.shift(1).rolling(24).sum() / (8 * base)).where(base > 0, 0.0)
+    # 15 dakikalık ADX (son tamamlanmış 15 dk mumu; açık mum kullanılmaz)
+    m15 = df5.resample("15min", label="left", closed="left").agg(
+        {"high": "max", "low": "min", "close": "last"}).dropna()
+    a = ta.adx(m15["high"], m15["low"], m15["close"])[0].shift(1)
+    f["adx"] = a.reindex(f.index, method="ffill")
+    f["adx_up"] = (a > a.shift(3)).reindex(f.index, method="ffill").fillna(False).astype(bool)
+    if session_only:
+        days = pd.Series([t.astimezone(TR).date() for t in f.index], index=f.index)
+        n = days.groupby(days).cumcount() + 1
+        f.loc[n <= 4, ["ch15", "z15", "vol_x"]] = 0.0
+        f.loc[n <= 13, ["ch1h", "z1h"]] = 0.0
+        f.loc[n <= 25, ["ch2h", "z2h", "vol2x"]] = 0.0
+    return f.fillna({"ch15": 0.0, "ch1h": 0.0, "ch2h": 0.0, "z15": 0.0, "z1h": 0.0, "z2h": 0.0,
+                     "vol_x": 0.0, "vol2x": 0.0, "adx": 0.0})
+
+
+def _g(r, k):
+    v = r.get(k) if isinstance(r, dict) else r[k]
+    return 0.0 if v is None or (isinstance(v, float) and np.isnan(v)) else float(v)
+
+
+def trend_ok(r, P: dict) -> bool:
+    """Trend başlangıcı koşulları (eşik hariç): 1 saat ile 2 saat aynı yönde ve hareket sürüyor,
+    hacim normalin üstünde, 15 dk ADX güçlü ve yükseliyor."""
+    c1, c2 = _g(r, "ch1h"), _g(r, "ch2h")
+    return (c2 != 0 and np.sign(c1) == np.sign(c2) and abs(c1) >= 0.4 * abs(c2)
+            and _g(r, "vol2x") >= P["TREND_VOL"] and _g(r, "adx") >= P["TREND_ADX"] and bool(r.get("adx_up")))
+
+
+def classify(r, P: dict) -> list[tuple[str, str]]:
+    """Bir ölçüm satırı hangi alarmları tetikler: [(tür, kind)], tür ∈ fast/volume/trend."""
+    c15, c1h, c2h = _g(r, "ch15"), _g(r, "ch1h"), _g(r, "ch2h")
+    fast = ((abs(_g(r, "z15")) >= P["K15"] and abs(c15) >= P["FLOOR_15M"])
+            or (abs(_g(r, "z1h")) >= P["K1H"] and abs(c1h) >= P["FLOOR_1H"]))
+    if fast:
+        return [("fast", "drop" if (c1h if abs(c1h) >= abs(c15) else c15) < 0 else "pump")]
+    out = []
+    if _g(r, "vol_x") >= P["VOLUME_X"] and abs(_g(r, "z15")) >= P["VOLUME_K"]:
+        out.append(("volume", "volume"))
+    if abs(_g(r, "z2h")) >= P["TREND_K"] and trend_ok(r, P):
+        out.append(("trend", "trend_up" if c2h > 0 else "trend_down"))
+    return out
+
+
+def near(r, P: dict, f: float = 0.5) -> bool:
+    """Eşiğin f katına yaklaşan olay (öğrenme için 'aday' olarak kaydedilir)."""
+    return (abs(_g(r, "z15")) >= P["K15"] * f or abs(_g(r, "z1h")) >= P["K1H"] * f
+            or (_g(r, "vol_x") >= P["VOLUME_X"] * f and abs(_g(r, "z15")) >= P["VOLUME_K"] * f)
+            or abs(_g(r, "z2h")) >= P["TREND_K"] * 0.6)
 
 
 def _due(symbol: str, kind: str, cooldown: int) -> bool:
@@ -94,29 +188,16 @@ def bist_open() -> bool:
     return now.weekday() < 5 and (10, 0) <= (now.hour, now.minute) <= (18, 10)
 
 
-def _intraday_metrics(df5, session_only: bool = False, profile=None) -> dict:
-    """5 dakikalık mumlardan 15 dk / 1 saat değişim ve hacim katı.
-    session_only (BIST): yalnız bugünün seans mumları sayılır; açılışta önceki günün kapanışı ve
-    kapanış seansı hacmi "ani hareket"/"hacim patlaması" sanılmasın."""
-    c, v = df5["close"], df5["volume"]
-    price = float(c.iloc[-1])
-    n = len(c)
-    if session_only:
-        today = datetime.now(TR).date()
-        n = int(sum(1 for t in df5.index if t.astimezone(TR).date() == today))
-    ch15 = (price / float(c.iloc[-4]) - 1) * 100 if n > 4 else 0.0
-    ch1h = (price / float(c.iloc[-13]) - 1) * 100 if n > 13 else 0.0
-    vol15 = v.rolling(3).sum()
-    # son tamamlanmış 15 dk (açık mum hariç) vs "normal": son 24 saatin medyanı ile
-    # o saat diliminin geçmiş günlerdeki medyanından büyüğü
-    recent = float(v.iloc[-4:-1].sum())
-    base = float(vol15.iloc[-292:-4].median()) if len(vol15) > 20 else np.nan
-    if profile is not None and n > 4:
-        slot_med = profile.get(_slot(df5.index[-4]))
-        if slot_med is not None and slot_med > 0 and not (base >= slot_med):
-            base = float(slot_med)
-    vol_x = recent / base if n > 4 and base and base > 0 else 0.0
-    return {"price": price, "ch15": ch15, "ch1h": ch1h, "vol_x": vol_x}
+def _live_metrics(item: str, df5: pd.DataFrame, is_bist: bool, fetch15) -> dict:
+    prof = _profile(item, fetch15)
+    typ = prof["typ"] if prof else typical_from(df5["close"], (3, 12, 24))
+    tod = None
+    if prof:
+        slots = pd.Series([_slot(t) for t in df5.index], index=df5.index).shift(3)
+        tod = slots.map(prof["vol"]).astype(float)
+    m = metrics_frame(df5, typ, tod, session_only=is_bist).iloc[-1].to_dict()
+    m["price"] = float(m["price"])
+    return m
 
 
 def _daily_signals(daily) -> list[tuple[str, str]]:
@@ -152,6 +233,13 @@ def _levels(daily, price: float) -> tuple[float | None, float | None]:
     return (min(above) if above else None), (max(below) if below else None)
 
 
+def _levels_line(daily, price) -> str:
+    res, sup = _levels(daily, price)
+    lv = " · ".join(x for x in (f"direnç {fmt_price(res)}" if res else "",
+                                f"destek {fmt_price(sup)}" if sup else "") if x)
+    return f"\nYakın seviyeler: {lv}" if lv else ""
+
+
 def check_symbol(item: str, report: bool = False) -> list[str]:
     """Tek bir varlığı kontrol eder. report=True ise eşiğe bakmadan durum özeti döner."""
     is_bist = item.upper().startswith("BIST:")
@@ -165,13 +253,13 @@ def check_symbol(item: str, report: bool = False) -> list[str]:
             return []
         df5, _ = get_stock_klines(code + ".IS", "5m", "5d")
         daily, _ = get_stock_klines(code + ".IS", "1d", "1y")
-        profile = _volume_profile(item, lambda: get_stock_klines(code + ".IS", "15m", "1mo")[0])
+        fetch15 = lambda: get_stock_klines(code + ".IS", "15m", "1mo")[0]  # noqa: E731
     else:
         df5, _ = get_klines(code + "USDT", "5m", 300)
         daily, _ = get_klines(code + "USDT", "1d", 200)
-        profile = _volume_profile(item, lambda: get_klines(code + "USDT", "15m", 1000)[0])
+        fetch15 = lambda: get_klines(code + "USDT", "15m", 1000)[0]  # noqa: E731
 
-    m = _intraday_metrics(df5, session_only=is_bist, profile=profile)
+    m = _live_metrics(item, df5, is_bist, fetch15)
     prev_close = float(daily["close"].iloc[-2])
     if is_bist:  # Yahoo geçmişinde gün eksik olabiliyor; resmi önceki kapanışı kullan
         try:
@@ -182,37 +270,43 @@ def check_symbol(item: str, report: bool = False) -> list[str]:
     day_ch = (m["price"] / prev_close - 1) * 100
 
     if report:
-        return [f"{label}: {fmt_price(m['price'])} · 15dk {m['ch15']:+.2f}% · 1s {m['ch1h']:+.2f}% · "
-                f"gün {day_ch:+.2f}% · hacim {m['vol_x']:.1f}x (saat normaline göre)"]
+        return [f"{label}: {fmt_price(m['price'])} · 15dk {m['ch15']:+.2f}% ({abs(m['z15']):.1f}x) · "
+                f"1s {m['ch1h']:+.2f}% ({abs(m['z1h']):.1f}x) · 2s {m['ch2h']:+.2f}% ({abs(m['z2h']):.1f}x) · "
+                f"gün {day_ch:+.2f}% · hacim {m['vol_x']:.1f}x"]
 
+    P = params()
+    sig = dict(classify(m, P))
     msgs = []
     head = f"<b>{label}</b> {fmt_price(m['price'])}"
-    fast = abs(m["ch15"]) >= DROP_15M or abs(m["ch1h"]) >= DROP_1H
-    if fast or (is_bist and abs(day_ch) >= BIST_DAY):
-        if fast:
-            down = (m["ch1h"] if abs(m["ch1h"]) >= abs(m["ch15"]) else m["ch15"]) < 0
-            kind, cooldown = ("drop" if down else "pump"), COOLDOWN_FAST
-        else:  # BIST gün içi toplam değişim: gün boyu iki saatte bir tekrar etmesin, günde bir kez
+    if "fast" in sig or (is_bist and abs(day_ch) >= BIST_DAY):
+        if "fast" in sig:
+            kind, cooldown = sig["fast"], COOLDOWN_FAST
+            down = kind == "drop"
+        else:  # BIST gün içi toplam değişim: günde bir kez
             down = day_ch < 0
             kind, cooldown = ("day_drop" if down else "day_pump"), COOLDOWN_DAILY
         if _due(code, kind, cooldown):
             title = "🚨🔻 ANİ DÜŞÜŞ" if down else "🚀🟢 ANİ YÜKSELİŞ"
-            msgs.append(_alert(f"{title} — {head}\n15 dk: {m['ch15']:+.2f}% · 1 saat: {m['ch1h']:+.2f}% · "
-                               f"gün: {day_ch:+.2f}%\nHacim: normalin {m['vol_x']:.1f} katı\n👉 {cmd}",
-                               item, kind, m, day_ch))
-    # Hacim alarmı: fiyat da oynamış olmalı; ani hareket alarmı zaten hacmi yazıyorsa ayrıca gönderme.
-    # Testte hacim yönü tahmin etmedi (~%50) ama sonrasında hareketin sertleştiğini gösterdi.
-    if (m["vol_x"] >= VOLUME_X and abs(m["ch15"]) >= VOLUME_MIN_MOVE and not fast
-            and _due(code, "volume", COOLDOWN_FAST)):
-        res, sup = _levels(daily, m["price"])
-        lv = " · ".join(x for x in (f"direnç {fmt_price(res)}" if res else "",
-                                    f"destek {fmt_price(sup)}" if sup else "") if x)
-        msgs.append(_alert(f"📊🔥 YÜKSEK İŞLEM HACMİ — {head}\n"
-                           f"Son 15 dk hacmi bu saatin normalinin <b>{m['vol_x']:.1f} katı</b> · "
-                           f"fiyat 15 dk: {m['ch15']:+.2f}%\n"
-                           "⚡ Sert hareket ihtimali yüksek; yön hacimden tek başına okunamaz."
-                           + (f"\nYakın seviyeler: {lv}" if lv else "") + f"\n👉 {cmd}",
-                           item, "volume", m, day_ch))
+            msgs.append(_alert(
+                f"{title} — {head}\n15 dk: {m['ch15']:+.2f}% (normalin {abs(m['z15']):.0f} katı) · "
+                f"1 saat: {m['ch1h']:+.2f}% (normalin {abs(m['z1h']):.0f} katı) · gün: {day_ch:+.2f}%\n"
+                f"Hacim: normalin {m['vol_x']:.1f} katı\n👉 {cmd}", item, kind, m, day_ch))
+    # Hacim: testte yönü tahmin etmedi (~%50) ama sonrasında hareketin sertleştiğini gösterdi.
+    if "volume" in sig and _due(code, "volume", COOLDOWN_FAST):
+        msgs.append(_alert(
+            f"📊🔥 YÜKSEK İŞLEM HACMİ — {head}\n"
+            f"Son 15 dk hacmi bu saatin normalinin <b>{m['vol_x']:.1f} katı</b> · "
+            f"fiyat 15 dk: {m['ch15']:+.2f}% (normalin {abs(m['z15']):.0f} katı)\n"
+            "⚡ Sert hareket ihtimali yüksek; yön hacimden tek başına okunamaz."
+            + _levels_line(daily, m["price"]) + f"\n👉 {cmd}", item, "volume", m, day_ch))
+    # Trend başlangıcı: 15 dk'lık patlama değil, saatlere yayılan istikrarlı hareket
+    if "trend" in sig and _due(code, "trend", COOLDOWN_TREND):
+        up = sig["trend"] == "trend_up"
+        msgs.append(_alert(
+            f"{'📈🟢 YÜKSELİŞ TRENDİ BAŞLIYOR OLABİLİR' if up else '📉🔴 DÜŞÜŞ TRENDİ BAŞLIYOR OLABİLİR'} — {head}\n"
+            f"2 saat: <b>{m['ch2h']:+.2f}%</b> (normalin {abs(m['z2h']):.1f} katı) · 1 saat: {m['ch1h']:+.2f}%\n"
+            f"Hacim son 2 saatte normalin {m['vol2x']:.1f} katı · 15 dk ADX {m['adx']:.0f} ve yükseliyor"
+            + _levels_line(daily, m["price"]) + f"\n👉 {cmd}", item, sig["trend"], m, day_ch))
     if not msgs:  # eşiğe yaklaşan ama alarm olmayan olay: öğrenme için kaydet
         import learn
         learn.maybe_log_candidate(item, m, day_ch)

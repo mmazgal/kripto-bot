@@ -25,6 +25,17 @@ create table if not exists alert_events (
   up24         numeric,
   dn24         numeric
 );
+-- Oynaklığa göre eşikler + trend alarmı + geçmişi yeniden oynatma için sütunlar.
+-- (Bu dosyayı daha önce çalıştırdıysanız tekrar çalıştırmanız yeterli; var olanlara dokunmaz.)
+alter table alert_events add column if not exists ch2h   numeric;   -- 2 saat değişim %
+alter table alert_events add column if not exists z15    numeric;   -- 15 dk değişim / tipik 15 dk hareket
+alter table alert_events add column if not exists z1h    numeric;
+alter table alert_events add column if not exists z2h    numeric;
+alter table alert_events add column if not exists vol2x  numeric;   -- son 2 saat hacmi / normal
+alter table alert_events add column if not exists adx    numeric;   -- 15 dk ADX
+alter table alert_events add column if not exists adx_up boolean;
+alter table alert_events add column if not exists source text not null default 'live';  -- live | backfill
+
 create index if not exists alert_events_at_idx    on alert_events (at);
 create index if not exists alert_events_stage_idx on alert_events (stage) where stage < 2;
 
