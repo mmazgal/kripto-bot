@@ -26,10 +26,10 @@ import store
 log = logging.getLogger("learn")
 TR = timezone(timedelta(hours=3))
 
-TUNABLE = ("K15", "K1H", "VOLUME_X", "VOLUME_K", "TREND_K")
+TUNABLE = ("K15", "K1H", "VOLUME_X", "VOLUME_K", "TREND_K", "REV_K")
 LIMITS = {"K15": (4.0, 25.0), "K1H": (4.0, 25.0), "VOLUME_X": (2.0, 10.0), "VOLUME_K": (1.0, 10.0),
-          "TREND_K": (2.0, 10.0)}
-STEPS = (0.8, 0.9, 1.0, 1.1, 1.25)     # bir turda en fazla %25 değişim (5 eşik → 3125 kombinasyon)
+          "TREND_K": (2.0, 10.0), "REV_K": (2.0, 10.0)}
+STEPS = (0.8, 0.9, 1.0, 1.1, 1.25)     # bir turda en fazla %25 değişim (6 eşik → 15625 kombinasyon)
 CAND_GAP = 900                         # aynı varlık için iki aday kaydı arasında en az 15 dk
 BACKFILL_DAYS = 14                     # geçmişi yeniden oynatma süresi
 TUNE_DAYS = 14                         # ayar için bakılan geçmiş
@@ -40,9 +40,13 @@ MAX_PER_ITEM_DAY = 2.5                 # bundan sık alarm üreten ayar kabul ed
 MIN_GAIN = 0.03                        # yeni ayar skoru en az bu kadar iyi olmalı
 MIN_VOTES = 8                          # hedef tanımı oylardan seçmek için gereken oy
 RETENTION_DAYS = 90
-TUNED_KINDS = ("candidate", "drop", "pump", "volume", "trend_up", "trend_down")
-DIRECTIONAL = {"drop": -1, "day_drop": -1, "trend_down": -1, "pump": 1, "day_pump": 1, "trend_up": 1}
-METRIC_COLS = ("ch15", "ch1h", "ch2h", "z15", "z1h", "z2h", "vol_x", "vol2x", "adx")
+TUNED_KINDS = ("candidate", "drop", "pump", "volume", "trend_up", "trend_down", "rev_up", "rev_down")
+# Yön = alarmın BEKLEDİĞİ yön: dip dönüşü (rev_up) yukarı, tepe dönüşü (rev_down) aşağı. Bu yüzden dönüş
+# alarmlarında başarı "devam" tanımıyla ölçülür ("dönüş" tanımı = alarmın beklediği dönüş olmadı demek).
+DIRECTIONAL = {"drop": -1, "day_drop": -1, "trend_down": -1, "rev_down": -1,
+               "pump": 1, "day_pump": 1, "trend_up": 1, "rev_up": 1}
+REV_COLS = ("zdd", "zru", "bounce", "pullback", "rsi15", "volpk")   # supabase_migration_4.sql
+METRIC_COLS = ("ch15", "ch1h", "ch2h", "z15", "z1h", "z2h", "vol_x", "vol2x", "adx") + REV_COLS
 
 # "İşe yaradı" tanımları: (açıklama, fonksiyon(olay, yön) -> True/False/None)
 DEFINITIONS = {
@@ -167,13 +171,47 @@ def _row(at: datetime, item: str, kind: str, sent: bool, m: dict, day_ch: float,
     return row
 
 
+_no_rev_cols = False  # migration_4 çalıştırılmadıysa yeni sütunlar olmadan yaz (kayıt durmasın)
+
+
+def _missing_col(ex) -> bool:
+    s = str(ex)
+    return "column" in s and any(c in s for c in REV_COLS)
+
+
+def _insert(row: dict) -> dict:
+    global _no_rev_cols
+    if _no_rev_cols:
+        row = {k: v for k, v in row.items() if k not in REV_COLS}
+    try:
+        return store.insert("alert_events", row)
+    except Exception as ex:  # noqa: BLE001
+        if _no_rev_cols or not _missing_col(ex):
+            raise
+        _no_rev_cols = True
+        log.warning("alert_events'te dönüş sütunları yok (supabase_migration_4.sql çalıştırılmalı); onlarsız yazılıyor")
+        return store.insert("alert_events", {k: v for k, v in row.items() if k not in REV_COLS})
+
+
+def _insert_many(rows: list[dict]):
+    global _no_rev_cols
+    try:
+        store.insert_many("alert_events", [{k: v for k, v in r.items() if k not in REV_COLS} for r in rows]
+                          if _no_rev_cols else rows)
+    except Exception as ex:  # noqa: BLE001
+        if _no_rev_cols or not _missing_col(ex):
+            raise
+        _no_rev_cols = True
+        store.insert_many("alert_events", [{k: v for k, v in r.items() if k not in REV_COLS} for r in rows])
+
+
 def log_event(item: str, kind: str, sent: bool, m: dict, day_ch: float) -> int | None:
     if not _db_ok():
         return None
     import alerts
     row = _row(_now(), item, kind, sent, m, day_ch, getattr(alerts, "CFG_VERSION", 0), "live")
     try:
-        res = store.insert("alert_events", row)
+        res = _insert(row)
         if kind in TUNED_KINDS:
             _last_cand[item] = time.time()
         return res.get("id")
@@ -355,7 +393,7 @@ def backfill(items: list[str], days: int = BACKFILL_DAYS) -> dict[str, int]:
             first_live = min((_parse(r["at"]) for r in live if r["item"] == item), default=_now())
             rows = _replay_item(item, days, min(first_live, _now() - timedelta(hours=4)))
             store.delete("alert_events", {"item": item, "source": "backfill"})
-            store.insert_many("alert_events", rows)
+            _insert_many(rows)
             out[item] = len(rows)
         except Exception as ex:  # noqa: BLE001
             log.warning("Geçmiş yeniden oynatılamadı (%s): %s", item, ex)
@@ -386,9 +424,10 @@ def cleanup():
 REASONS = {-2: ("late", "⏰ Geç kaldı"), -3: ("rev", "↩️ Ters yöne gitti"),
            -4: ("small", "🤏 Hareket küçük kaldı"), -5: ("mute", "🙅 İlgilendirmiyor")}
 VOTES = (1, -1) + tuple(REASONS)
-GROUP_PARAMS = {"fast": ("K15", "K1H"), "volume": ("VOLUME_X", "VOLUME_K"), "trend": ("TREND_K",)}
+GROUP_PARAMS = {"fast": ("K15", "K1H"), "volume": ("VOLUME_X", "VOLUME_K"), "trend": ("TREND_K",),
+                "rev": ("REV_K",)}
 GROUP_TR = {"fast": "ani hareket", "volume": "yüksek hacim", "trend": "trend başlangıcı",
-            "teknik": "teknik sinyal", "funding": "vadeli işlem"}
+            "rev": "dip/tepe dönüşü", "teknik": "teknik sinyal", "funding": "vadeli işlem"}
 MIN_REASON = 3            # bir sebebin eşiği değiştirmesi için en az bu kadar oy (son 14 gün)
 MUTE_DAYS = 30
 
@@ -398,6 +437,8 @@ def group_of(kind: str) -> str:
         return "fast"
     if kind in ("trend_up", "trend_down"):
         return "trend"
+    if kind in ("rev_up", "rev_down"):
+        return "rev"
     if kind in ("volume", "funding"):
         return kind
     return "teknik"
@@ -451,7 +492,7 @@ def reversal_groups() -> set[str]:
     out = set()
     try:
         for g, c in reason_summary(30).items():
-            if c.get("rev", 0) >= MIN_REASON and c.get("rev", 0) == max(c.values()):
+            if g != "rev" and c.get("rev", 0) >= MIN_REASON and c.get("rev", 0) == max(c.values()):
                 sent = [r for r in _events(_now() - timedelta(days=30))
                         if r.get("sent") and group_of(r["kind"]) == g]
                 labs = [x for x in (label(r, "donus") for r in sent) if x is not None]
@@ -550,6 +591,9 @@ class Sim:
         self.az15, self.az1h, self.az2h = g("z15"), g("z1h"), g("z2h")
         self.ac15, self.ac1h, self.vx = g("ch15"), g("ch1h"), np.array([r["vol_x"] or 0.0 for r in rows])
         self.tok = np.array([alerts.trend_ok(r, P) for r in rows])   # eşikten bağımsız trend koşulları
+        self.rok = np.array([alerts.rev_ok(r, P) for r in rows])     # dönüş koşulları: +1 dip, -1 tepe, 0
+        self.zdd = np.array([r.get("zdd") or 0.0 for r in rows])
+        self.zru = np.array([r.get("zru") or 0.0 for r in rows])
         self.lab = np.array([r["_lab"] for r in rows])
         self.ts = np.array([r["_ts"] for r in rows])
         self.item = [r["item"] for r in rows]
@@ -563,9 +607,10 @@ class Sim:
                ((self.az1h >= p["K1H"]) & (self.ac1h >= self.floor1h))
         vol = ~fast & (self.vx >= p["VOLUME_X"]) & (self.az15 >= p["VOLUME_K"])
         trd = ~fast & self.tok & (self.az2h >= p["TREND_K"])
+        rev = ~fast & (((self.rok > 0) & (self.zdd <= -p["REV_K"])) | ((self.rok < 0) & (self.zru >= p["REV_K"])))
         fired = hits = 0
         caught = np.zeros(len(self.rows), dtype=bool)
-        for typ, mask in (("fast", fast), ("volume", vol), ("trend", trd)):
+        for typ, mask in (("fast", fast), ("volume", vol), ("trend", trd), ("rev", rev)):
             cd = alerts.COOLDOWNS[typ]
             last: dict[str, float] = {}
             for i in np.flatnonzero(mask):
@@ -657,10 +702,12 @@ def tune(apply: bool = True, force: bool = False) -> dict:
 # ---------------- Raporlar ----------------
 NAMES = {"K15": "Ani hareket 15 dk (normalin katı)", "K1H": "Ani hareket 1 saat (normalin katı)",
          "VOLUME_X": "Hacim (normalin katı)", "VOLUME_K": "Hacim alarmı için fiyat (normalin katı)",
-         "TREND_K": "Trend başlangıcı 2 saat (normalin katı)"}
+         "TREND_K": "Trend başlangıcı 2 saat (normalin katı)",
+         "REV_K": "Dip/tepe dönüşü öncesi hareket (normalin katı)"}
 KIND_TR = {"drop": "ani düşüş", "pump": "ani yükseliş", "volume": "yüksek hacim", "day_drop": "BIST gün içi düşüş",
            "day_pump": "BIST gün içi yükseliş", "funding": "vadeli işlem", "candidate": "aday",
-           "trend_up": "yükseliş trendi", "trend_down": "düşüş trendi"}
+           "trend_up": "yükseliş trendi", "trend_down": "düşüş trendi",
+           "rev_up": "dip dönüşü", "rev_down": "tepe dönüşü"}
 
 
 def _pct(a, b):

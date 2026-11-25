@@ -33,21 +33,32 @@ VOLUME_X = 4.0      # hacim: son 15 dk hacmi, o saatin normalinin kaç katı (no
                     # son ~10 günlük medyanı ile son 24 saatin medyanından büyüğü)
 VOLUME_K = 4.0      # hacim alarmı için 15 dk fiyat değişimi tipik hareketin en az kaç katı olmalı
 TREND_K = 4.0       # trend başlangıcı: 2 saatlik değişim, tipik 2 saatlik hareketin kaç katı
+REV_K = 4.0         # dip/tepe dönüşü: son 4 saatin zirvesinden düşüş (dibinden yükseliş), tipik 2 saatlik
+                    # hareketin kaç katı
 # ---- Sabit koşullar (ayarlanmaz) ----
 FLOOR_15M = 0.8     # çok sakin varlıklarda anlamsız küçük hareketler alarm olmasın: en az ±% (15 dk)
 FLOOR_1H = 1.2      # en az ±% (1 saat)
 TREND_VOL = 1.3     # trend: son 2 saatin hacmi normalin en az bu katı
 TREND_ADX = 20.0    # trend: 15 dakikalık ADX en az bu ve yükseliyor
+REV_RSI = 25.0      # dönüş: 15 dk RSI ≤ 25 (dip) / ≥ 75 (tepe)
+REV_VOL = 3.0       # dönüş: son 1 saatte hacim normalin en az 3 katına çıkmış (satış/alış zirvesi)...
+REV_FADE = 0.6      # ...ve şimdi o zirvenin %60'ının altına inmiş (baskı sönüyor)
+REV_BOUNCE = 1.0    # dönüş: son 1 saatin dibinden (tepesinden) en az 1 tipik 15 dk hareket kadar dönmüş
 BIST_DAY = 4.0      # BIST: önceki kapanışa göre ±% gün içi değişim (günde bir)
+# Dönüş alarmı mesajındaki geçmiş test özeti (BTC/ETH/SOL/DOGE/PEPE, 26.10–25.11.2026; "belirgin" = tipik 4s hareket kadar)
+REV_HIST_DIP = ("Geçmiş test (30 gün, 5 coin): 100 dip alarmından 43'ünde fiyat 4 saatte belirgin yükseldi "
+                "(rastgele anlarda 23), 35'inde düşüş sürdü. Riskli; geçersizlik seviyesine dikkat.")
+REV_HIST_TOP = ("Geçmiş test (30 gün, 5 coin): 100 tepe alarmından 70'inde fiyat 4 saatte belirgin düştü "
+                "(rastgele anlarda 29). Örneklem küçük (27 alarm) ve düşen piyasada ölçüldü.")
 PROFILE_TTL = 3600  # hacim profili ve tipik hareket önbelleği (sn)
 COOLDOWN_FAST = 2 * 3600    # ani hareket / hacim alarmı tekrar süresi (sn)
 COOLDOWN_TREND = 4 * 3600   # trend alarmı tekrar süresi
 COOLDOWN_DAILY = 20 * 3600  # günlük teknik sinyal tekrar süresi
 
-TUNABLE = ("K15", "K1H", "VOLUME_X", "VOLUME_K", "TREND_K")
+TUNABLE = ("K15", "K1H", "VOLUME_X", "VOLUME_K", "TREND_K", "REV_K")
 DEFAULTS = {k: globals()[k] for k in TUNABLE}
 CFG_VERSION = 0
-COOLDOWNS = {"fast": COOLDOWN_FAST, "volume": COOLDOWN_FAST, "trend": COOLDOWN_TREND}
+COOLDOWNS = {"fast": COOLDOWN_FAST, "volume": COOLDOWN_FAST, "trend": COOLDOWN_TREND, "rev": COOLDOWN_TREND}
 
 _last_sent: dict[tuple[str, str], float] = {}
 _profiles: dict[str, tuple[float, object]] = {}
@@ -55,7 +66,8 @@ _profiles: dict[str, tuple[float, object]] = {}
 
 def params() -> dict:
     """Karar için kullanılan tüm eşikler (ayarlananlar + sabitler)."""
-    names = TUNABLE + ("FLOOR_15M", "FLOOR_1H", "TREND_VOL", "TREND_ADX")
+    names = TUNABLE + ("FLOOR_15M", "FLOOR_1H", "TREND_VOL", "TREND_ADX", "REV_RSI", "REV_VOL", "REV_FADE",
+                       "REV_BOUNCE")
     return {k: float(globals()[k]) for k in names}
 
 
@@ -129,14 +141,29 @@ def metrics_frame(df5: pd.DataFrame, typ, tod=None, session_only: bool = False) 
     a = ta.adx(m15["high"], m15["low"], m15["close"])[0].shift(1)
     f["adx"] = a.reindex(f.index, method="ffill")
     f["adx_up"] = (a > a.shift(3)).reindex(f.index, method="ffill").fillna(False).astype(bool)
+    # Dip/tepe dönüşü için: tepeden düşüş / dipten yükseliş (son 4 saat), son 1 saatin ucundan sekme,
+    # 15 dk RSI (son tamamlanmış mum), son 1 saatteki en yüksek hacim katı
+    hi4, lo4 = df5["high"].rolling(48, min_periods=12).max(), df5["low"].rolling(48, min_periods=12).min()
+    f["zdd"] = (c / hi4 - 1) * 100 / f["t2h"]
+    f["zru"] = (c / lo4 - 1) * 100 / f["t2h"]
+    lo1, hi1 = df5["low"].rolling(12).min(), df5["high"].rolling(12).max()
+    f["lo1"], f["hi1"] = lo1, hi1
+    f["bounce"] = (c / lo1 - 1) * 100 / f["t15"]
+    f["pullback"] = (1 - c / hi1) * 100 / f["t15"]
+    f["rsi15"] = ta.rsi(m15["close"]).shift(1).reindex(f.index, method="ffill")
+    f["volpk"] = f["vol_x"].rolling(12).max()
     if session_only:
         days = pd.Series([t.astimezone(TR).date() for t in f.index], index=f.index)
         n = days.groupby(days).cumcount() + 1
         f.loc[n <= 4, ["ch15", "z15", "vol_x"]] = 0.0
         f.loc[n <= 13, ["ch1h", "z1h"]] = 0.0
         f.loc[n <= 25, ["ch2h", "z2h", "vol2x"]] = 0.0
+    if session_only:  # BIST: önceki günün uçları bugünkü dönüşü sanılmasın
+        f.loc[n <= 48, ["zdd", "zru"]] = 0.0
+        f.loc[n <= 12, ["bounce", "pullback", "volpk"]] = 0.0
     return f.fillna({"ch15": 0.0, "ch1h": 0.0, "ch2h": 0.0, "z15": 0.0, "z1h": 0.0, "z2h": 0.0,
-                     "vol_x": 0.0, "vol2x": 0.0, "adx": 0.0})
+                     "vol_x": 0.0, "vol2x": 0.0, "adx": 0.0, "zdd": 0.0, "zru": 0.0, "bounce": 0.0,
+                     "pullback": 0.0, "rsi15": 50.0, "volpk": 0.0})
 
 
 def _g(r, k):
@@ -152,6 +179,19 @@ def trend_ok(r, P: dict) -> bool:
             and _g(r, "vol2x") >= P["TREND_VOL"] and _g(r, "adx") >= P["TREND_ADX"] and bool(r.get("adx_up")))
 
 
+def rev_ok(r, P: dict) -> int:
+    """Dip/tepe dönüşü koşulları (eşik hariç): +1 dip (yukarı dönüş), -1 tepe (aşağı dönüş), 0 yok.
+    Aşırı RSI + hacim zirvesi yapıp sönmüş + son 1 saatin ucundan dönmeye başlamış."""
+    vp, vx, rsi = _g(r, "volpk"), _g(r, "vol_x"), _g(r, "rsi15")
+    if vp < P["REV_VOL"] or vx > P["REV_FADE"] * vp:
+        return 0
+    if rsi <= P["REV_RSI"] and _g(r, "bounce") >= P["REV_BOUNCE"]:
+        return 1
+    if rsi >= 100 - P["REV_RSI"] and _g(r, "pullback") >= P["REV_BOUNCE"]:
+        return -1
+    return 0
+
+
 def classify(r, P: dict) -> list[tuple[str, str]]:
     """Bir ölçüm satırı hangi alarmları tetikler: [(tür, kind)], tür ∈ fast/volume/trend."""
     c15, c1h, c2h = _g(r, "ch15"), _g(r, "ch1h"), _g(r, "ch2h")
@@ -164,6 +204,9 @@ def classify(r, P: dict) -> list[tuple[str, str]]:
         out.append(("volume", "volume"))
     if abs(_g(r, "z2h")) >= P["TREND_K"] and trend_ok(r, P):
         out.append(("trend", "trend_up" if c2h > 0 else "trend_down"))
+    d = rev_ok(r, P)
+    if (d > 0 and _g(r, "zdd") <= -P["REV_K"]) or (d < 0 and _g(r, "zru") >= P["REV_K"]):
+        out.append(("rev", "rev_up" if d > 0 else "rev_down"))
     return out
 
 
@@ -171,7 +214,9 @@ def near(r, P: dict, f: float = 0.5) -> bool:
     """Eşiğin f katına yaklaşan olay (öğrenme için 'aday' olarak kaydedilir)."""
     return (abs(_g(r, "z15")) >= P["K15"] * f or abs(_g(r, "z1h")) >= P["K1H"] * f
             or (_g(r, "vol_x") >= P["VOLUME_X"] * f and abs(_g(r, "z15")) >= P["VOLUME_K"] * f)
-            or abs(_g(r, "z2h")) >= P["TREND_K"] * 0.6)
+            or abs(_g(r, "z2h")) >= P["TREND_K"] * 0.6
+            or (_g(r, "zdd") <= -P["REV_K"] * 0.6 and _g(r, "rsi15") <= P["REV_RSI"] + 10)
+            or (_g(r, "zru") >= P["REV_K"] * 0.6 and _g(r, "rsi15") >= 90 - P["REV_RSI"]))
 
 
 def _due(symbol: str, kind: str, cooldown: int) -> bool:
@@ -313,6 +358,22 @@ def check_symbol(item: str, report: bool = False) -> list[str]:
             f"2 saat: <b>{m['ch2h']:+.2f}%</b> (normalin {abs(m['z2h']):.1f} katı) · 1 saat: {m['ch1h']:+.2f}%\n"
             f"Hacim son 2 saatte normalin {m['vol2x']:.1f} katı · 15 dk ADX {m['adx']:.0f} ve yükseliyor"
             + _levels_line(daily, m["price"]) + f"\n👉 {cmd}", item, sig["trend"], m, day_ch))
+    # Dip/tepe dönüşü: sert hareketten sonra aşırı RSI + sönen hacim + dönüş başlangıcı
+    if "rev" in sig and _due(code, "rev", COOLDOWN_TREND):
+        dip = sig["rev"] == "rev_up"
+        ext = m["lo1"] if dip else m["hi1"]
+        hist = (REV_HIST_DIP if dip else REV_HIST_TOP)
+        drop = m["zdd"] * m["t2h"] if dip else m["zru"] * m["t2h"]
+        turn = (m["price"] / ext - 1) * 100
+        msgs.append(_alert(
+            f"{'🔄🟢 DİP DÖNÜŞÜ ADAYI' if dip else '🔄🔴 TEPE DÖNÜŞÜ ADAYI'} — {head}\n"
+            f"Son 4 saatte {'zirveden' if dip else 'dipten'} <b>{drop:+.2f}%</b> "
+            f"(normalin {abs(m['zdd'] if dip else m['zru']):.1f} katı) · 15 dk RSI {m['rsi15']:.0f}\n"
+            f"{'Satış' if dip else 'Alış'} hacmi zirve yaptı (normalin {m['volpk']:.1f} katı), şimdi söndü "
+            f"({m['vol_x']:.1f} katı) · {'dipten' if dip else 'tepeden'} {turn:+.2f}% döndü\n"
+            f"❗ Geçersizlik: fiyat {fmt_price(ext)} {'altına inerse' if dip else 'üstüne çıkarsa'} dönüş bozulur."
+            + _levels_line(daily, m["price"]) +
+            f"\n<i>{hist}</i>\n👉 {cmd}", item, sig["rev"], m, day_ch))
     if not msgs:  # eşiğe yaklaşan ama alarm olmayan olay: öğrenme için kaydet
         import learn
         learn.maybe_log_candidate(item, m, day_ch)

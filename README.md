@@ -22,7 +22,7 @@ Tamamen ücretsiz servislerle çalışır: Render (sunucu), Supabase (veritaban�
 | 📰 | **Haberler** | Her analizin altında o varlıkla ilgili son 3 Türkçe haber |
 | 🌡 | **Piyasa havası** | Kripto Korku/Açgözlülük endeksi, BTC dominansı, BIST 100 günlük değişim, USD/TRY |
 | ⚖️ | **Karşılaştırma** | Birden fazla varlığı tek tabloda: günlük/haftalık değişim, RSI, 1H/1A yönü |
-| 🚨 | **Alarmlar** | Ani düşüş/yükseliş, trend başlangıcı, hacim patlaması, SAR trend dönüşü, RSI aşırı alım/satım; eşikler her varlığın kendi oynaklığına göre |
+| 🚨 | **Alarmlar** | Ani düşüş/yükseliş, trend başlangıcı, dip/tepe dönüşü, hacim patlaması, SAR trend dönüşü, RSI aşırı alım/satım; eşikler her varlığın kendi oynaklığına göre |
 | 🎯 | **Fiyat hedefi** | Belirlediğin seviye yukarı/aşağı kırılınca haber |
 | ☀️ | **Sabah özeti** | Her gün 09:00'da piyasa havası + takip listesinin durumu |
 | 💼 | **Portföy** | Kâr/zarar takibi; kripto ($) + BIST (₺) ve TL cinsinden genel toplam |
@@ -109,6 +109,7 @@ Hisseler kodla ya da şirket adıyla bulunur (`aselsan` → `ASELS`).
 |---|---|---|
 | 🚨 Ani düşüş / 🚀 ani yükseliş | 15 dk'da varlığın normal 15 dk hareketinin **10 katı** veya 1 saatte normalin **10 katı** (en az ±%0.8 / ±%1.2). BIST'te ayrıca gün içi ±%4 (günde bir) | 2 saatte bir |
 | 📈 Trend başlangıcı | 2 saatte normalin **4 katı**, son 1 saatte de aynı yönde sürüyor, son 2 saatin hacmi normalin 1.3 katı, 15 dk ADX ≥ 20 ve yükseliyor | 4 saatte bir |
+| 🔄 Dip / tepe dönüşü | Son 4 saatin zirvesinden düşüş (dibinden yükseliş) normalin **4 katı**, 15 dk RSI ≤ 25 (≥ 75), son 1 saatte hacim normalin ≥ 3 katına çıkıp zirvesinin %60'ının altına sönmüş, fiyat son 1 saatin dibinden (tepesinden) ≥ 1 tipik 15 dk hareket kadar dönmüş. Mesajda **geçersizlik seviyesi** (o dip/tepe) ve geçmiş test sonucu yazar | 4 saatte bir |
 | 📊 Yüksek hacim | Son 15 dk hacmi **o saatin normalinin** 4 katı **ve** fiyat 15 dk'da normalin en az 4 katı oynamış (aynı anda ani hareket alarmı varsa ayrıca gönderilmez) | 2 saatte bir |
 | 🔔 Teknik sinyal | Günlük SAR trend dönüşü, RSI 30'un altına / 70'in üstüne geçiş | Günde bir |
 | 🎯 Fiyat hedefi | `/hedef` ile kurulan seviye kırıldığında | Bir kez |
@@ -121,6 +122,22 @@ Başlangıç eşikleri `alerts.py` dosyasının başındadır; ani hareket, tren
 1 saatte %4" kuralı BTC'de günde 0.25, SOL'de 0.35, DOGE'de 0.45, PEPE'de 0.9 alarm üretiyordu (BTC için %2.5 normalin 16
 katı, PEPE için 9 katı). "Normal hareket" = o varlığın son ~10 gündeki 15 dk / 1 saat / 2 saatlik mutlak hareketlerinin
 medyanı (saatlik yenilenir). Taban yüzdeler, çok sakin varlıklarda anlamsız küçük hareketlerin alarm olmasını engeller.
+
+**Dip/tepe dönüşü — geçmiş test (BTC/ETH/SOL/DOGE/PEPE, 30 gün, 26.10–25.11.2026).** "Belirgin" = 4 saatte beklenen
+yönde en az tipik 4 saatlik hareket kadar. Ezber kontrolü için dönem ikiye bölündü:
+
+| Kural | Alarm | Belirgin dönüş | Ters gitti | Ort. hareket (tipik 4s'in katı) |
+|---|---|---|---|---|
+| Rastgele an (yukarı / aşağı beklentisi) | 896 | %23 / %29 | %29 / %23 | -0.33 / +0.33 |
+| Basit: sert hareket + RSI ≤25 | 122 | %43 (1. yarı %53, 2. yarı %36) | %22 | +0.32 |
+| **Tam kural** (+ hacim zirvesi sönmüş + dönüş başlamış) | 90 | **%51** (1. yarı %64, 2. yarı %43) | %24 | **+0.90** |
+| ↳ yalnız dip alarmları | 63 | %43 (rastgele %23) | %35 | +0.38 |
+| ↳ yalnız tepe alarmları | 27 | %70 (rastgele %29) | %0 | +2.11 |
+
+Hacim ve dönüş filtreleri basit "aşırı satım" kuralına göre belirgin fark yarattı. Dip alarmı düşen piyasada bile rastgelenin
+~2 katı tuttu ama üçte birinde düşüş sürdü (SOL'de hiç tutmadı) — bu yüzden mesaj geçersizlik seviyesini verir. Tepe
+alarmının sonucu düşen piyasada ölçüldüğü için iyimser olabilir. Eşik (REV_K) öğrenme döngüsünde haftalık ayarlanır;
+dönüş alarmlarında başarı "devam" tanımıyla ölçülür (alarmın beklediği yöne gitti mi).
 
 **Trend başlangıcı neden var?** Alarm karnesinde kaçırılan büyük hareketlerin çoğu 15 dakikalık patlamalar değil, 2-4 saate
 yayılan istikrarlı hareketlerdi. Geçmişin yeniden oynatılmasında (BTC+SOL+THYAO, 14 gün) trend alarmlarından sonra 4 saatte
@@ -163,12 +180,12 @@ Adım adım doğruya yaklaşma döngüsü: **kaydet → sonucu ölç → puanla 
    yaklaşan anlar sonuçlarıyla birlikte `source='backfill'` olarak kaydedilir. `/alarmkarne gecmis` ile hemen,
    ayrıca her pazartesi ayar turundan önce otomatik çalışır (yeni eklenen varlıklar da dahil olsun). Canlı kayıtların
    başladığı andan sonrası oynatılmaz (çift sayılmasın); karne ve durum raporları yalnız canlı kayıtları sayar.
-6. **Haftalık ayar (pazartesi 09:20, otomatik uygulanır):** Son 14 günün olayları üzerinde 3125 eşik kombinasyonu
-   (5 eşik × 5 adım) simüle edilir, F0.5 skoru (isabet, yakalamadan 2 kat önemli) en iyi olan seçilir. Korumalar: her
+6. **Haftalık ayar (pazartesi 09:20, otomatik uygulanır):** Son 14 günün olayları üzerinde 15625 eşik kombinasyonu
+   (6 eşik × 5 adım, ~7 sn) simüle edilir, F0.5 skoru (isabet, yakalamadan 2 kat önemli) en iyi olan seçilir. Korumalar: her
    eşik turda en fazla %25 değişir (bu sayede kötü çıkan değişiklik sonraki hafta geri alınabilir), en az 7 günlük veri
    ve 12 simüle alarm gerekir, varlık başına günde 2.5'ten fazla alarm üreten ayar seçilmez, kazanç anlamlı değilse
    değişiklik yapılmaz. Gemini sonuçları Türkçe yorumlar. Ayarlanan eşikler (hepsi "normalin katı"): ani hareket
-   15 dk / 1 saat, hacim, hacim alarmı için fiyat, trend başlangıcı 2 saat.
+   15 dk / 1 saat, hacim, hacim alarmı için fiyat, trend başlangıcı 2 saat, dip/tepe dönüşü öncesi hareket.
 
 Veri boyutu: günde birkaç yüz satır + yeniden oynatma (~1000 satır/hafta; ~2-3 MB/ay); 90 günden eski kayıtlar silinir.
 İlk denemeler (Kasım 2026, küçük örneklem): eski sabit eşikli ani hareket alarmlarından sonra fiyat 4 saatte daha sık
@@ -242,7 +259,9 @@ Süresi dolan tahmin saatlik olarak gerçek fiyatla karşılaştırılır:
 Telegram'da **@BotFather** → `/newbot` → bot adı ve kullanıcı adı → **token**'ı alın.
 
 ### 2. Supabase (veritabanı)
-1. **SQL Editor**'e sırayla `supabase_schema.sql`, `supabase_migration_2.sql` ve `supabase_migration_3.sql` içeriğini yapıştırıp **Run** deyin.
+1. **SQL Editor**'e sırayla `supabase_schema.sql`, `supabase_migration_2.sql`, `supabase_migration_3.sql` ve
+   `supabase_migration_4.sql` içeriğini yapıştırıp **Run** deyin. (Hepsi tekrar çalıştırılabilir. 4. dosya çalıştırılmasa da
+   bot çalışır; yalnız dönüş alarmının ölçümleri kaydedilmez ve eşiği ayarlanamaz.)
 2. **Project Settings → API** sayfasından *Project URL* ve **service_role** anahtarını alın.
 
 ### 3. Render (sunucu)

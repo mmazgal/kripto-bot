@@ -589,6 +589,8 @@ async def alarm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Ani düşüş/yükseliş: 15 dk'da normal hareketin {alerts.K15:g} katı veya 1 saatte {alerts.K1H:g} katı "
             f"(en az ±%{alerts.FLOOR_15M:g} / ±%{alerts.FLOOR_1H:g})\n"
             f"• Trend başlangıcı: 2 saatte normalin {alerts.TREND_K:g} katı, aynı yönde sürüyor, hacim artmış, ADX yükseliyor\n"
+            f"• Dip/tepe dönüşü: son 4 saatte normalin {alerts.REV_K:g} katı düşüş (yükseliş), 15 dk RSI ≤{alerts.REV_RSI:g} "
+            f"(≥{100 - alerts.REV_RSI:g}), hacim zirve yapıp sönmüş, fiyat dönmeye başlamış\n"
             f"• Yüksek hacim: son 15 dk hacmi o saatin normalinin {alerts.VOLUME_X:g} katı ve fiyat normalin "
             f"{alerts.VOLUME_K:g} katı oynamış\n"
             "• Teknik sinyal: günlük SAR trend dönüşü, RSI 30/70 geçişi\n"
